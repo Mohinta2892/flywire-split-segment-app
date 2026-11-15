@@ -1,0 +1,7 @@
+{
+  "server_address": "https://global.connectomics.braininbrain.org",
+  "samples": {
+    "Parker-Goog": "zlatic_parker_google_segmentation_datastack",
+    "Parker_LSD": "zlatic_parker_v1b_datastack"
+  }
+}

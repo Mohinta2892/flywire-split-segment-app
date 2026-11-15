@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How to use the segment splitter</title>
+<style>
+*{box-sizing:border-box}
+body{font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#f4f5f7;color:#1c2330}
+main{max-width:860px;margin:auto;padding:36px 20px 64px}
+h1{font-size:26px;font-weight:650;margin:0 0 4px}
+h2{font-size:18px;font-weight:650;margin:40px 0 10px;padding-top:8px}
+h3{font-size:15px;font-weight:650;margin:22px 0 6px}
+p,li{max-width:70ch}
+.lead{color:#5b6472;margin:0 0 20px;font-size:16px}
+.warn{background:#fff4f2;border:1px solid #f3c8c2;border-left:4px solid #b3261e;border-radius:8px;padding:12px 16px;margin:20px 0}
+.note{background:#fff;border:1px solid #e1e4e9;border-left:4px solid #2b59c3;border-radius:8px;padding:12px 16px;margin:16px 0}
+figure{margin:16px 0 8px}
+figure img{width:100%;height:auto;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 3px #10182814;background:#fff}
+figcaption{font-size:13px;color:#5b6472;margin-top:6px}
+ol,ul{padding-left:22px}li{margin:4px 0}
+code,kbd{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;background:#eceef1;border-radius:4px;padding:1px 5px}
+pre{background:#1c2330;color:#e8ebf0;border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:13px}
+pre code{background:none;color:inherit;padding:0}
+table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #e1e4e9;border-radius:10px;overflow:hidden;font-size:14px;margin:10px 0}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid #eceef1}
+th{font-size:12px;font-weight:600;color:#5b6472;background:#fafbfc}tr:last-child td{border-bottom:0}
+.s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}
+.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}
+nav.toc{background:#fff;border:1px solid #e1e4e9;border-radius:10px;padding:12px 18px;margin:20px 0}
+nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:hover{text-decoration:underline}
+@media (max-width:600px){main{padding:24px 16px 48px}td,th{padding:8px}}
+</style>
+</head>
+<body>
+<main>
+<h1>How to use the segment splitter</h1>
+<p class="lead">The segment splitter cuts large, wrongly merged segments into smaller pieces, so they are easier to proofread by hand.</p>
+
+<div class="warn"><strong>Every split is a real, permanent edit</strong> to the segmentation that everyone works on. Each cut is checked with a preview before it is made, but double-check the segment ID before you press <strong>Start</strong>.</div>
+
+<nav class="toc"><strong>Contents</strong>
+<ol>
+<li><a href="#open">Open the app</a></li>
+<li><a href="#split">Split a segment</a></li>
+<li><a href="#rounds">Cut into more pieces with rounds</a></li>
+<li><a href="#progress">Follow the progress</a></li>
+<li><a href="#problems">When something goes wrong</a></li>
+<li><a href="#know">Good to know</a></li>
+</ol></nav>
+
+<h2 id="open">1. Open the app</h2>
+<p>The app runs on the lab's GPU server. Whoever starts it gets a link that looks like this:</p>
+<pre><code>http://127.0.0.1:8765/?token=y8F6Vic…</code></pre>
+<p>To open it from your own computer, first connect to the server with a tunnel, then open the link in your browser:</p>
+<pre><code>ssh -L 8765:localhost:8765 &lt;server&gt;</code></pre>
+<ul>
+<li><strong>The token in the link is a password.</strong> Anyone with the link can make edits with the server's CAVE account, so don't share it or paste it in chat.</li>
+<li><strong>The link changes every time the app restarts.</strong> If the page says "Missing or wrong token", ask for the new link.</li>
+<li>Click <strong>How to use</strong> at the top right of the app at any time to open this guide.</li>
+</ul>
+
+<h2 id="split">2. Split a segment</h2>
+<figure>
+<img src="screenshots/form.png" alt="The start form: Sample menu set to Parker-Goog, a segment ID typed in, Rounds set to 2, Preview first ticked, and the Start button.">
+<figcaption>The start form, filled in for a two-round split.</figcaption>
+</figure>
+<ol>
+<li><strong>Sample:</strong> choose the dataset the segment belongs to.</li>
+<li><strong>Segment:</strong> paste one segment (root) ID, for example from Neuroglancer. Only digits are accepted.</li>
+<li><strong>Rounds:</strong> leave it at <code>1</code> to cut the segment into two pieces. See <a href="#rounds">rounds</a> to cut further.</li>
+<li><strong>Preview first:</strong> leave it ticked. The app then checks the cut with a read-only preview and only makes the edit if the preview passes. You won't be asked to confirm.</li>
+<li>Click <strong>Start</strong>. The job appears under <strong>Progress</strong>.</li>
+</ol>
+<div class="note"><strong>Unticking "Preview first"</strong> skips the check and makes the edit straight away, after one confirmation. A bad cut then only shows up after the edit, so keep the preview on unless you have a reason not to.</div>
+
+<h2 id="rounds">3. Cut into more pieces with rounds</h2>
+<p>Each cut gives two large pieces. With more than one round, the app keeps going and cuts each of those pieces again:</p>
+<table>
+<tr><th>Rounds</th><th>What happens</th><th>Edits at most</th><th>Large pieces</th></tr>
+<tr><td>1</td><td>A → B + C</td><td>1</td><td>2</td></tr>
+<tr><td>2</td><td>then B → B0 + B1 and C → C0 + C1</td><td>3</td><td>4</td></tr>
+<tr><td>3</td><td>then each of those again</td><td>7</td><td>8</td></tr>
+</table>
+<p>The hint under the form shows these numbers before you start. The maximum is 6 rounds. Every cut in the tree gets its own preview, and a branch stops on its own if its preview fails or a piece is too small (under 10 L2 nodes). The other branches carry on.</p>
+
+<h2 id="progress">4. Follow the progress</h2>
+<figure>
+<img src="screenshots/progress.png" alt="The Progress table, listing jobs with their sample, segment, status and result. A two-round split shows its two pieces nested underneath it.">
+<figcaption>Example progress. The two-round split at the top shows its two pieces nested underneath it. One is done, and the other is still previewing.</figcaption>
+</figure>
+<p>The newest jobs are at the top, and pieces from later rounds are nested under the segment they came from. The page updates itself every few seconds.</p>
+<table>
+<tr><th>Status</th><th>Meaning</th><th>Was anything edited?</th></tr>
+<tr><td><span class="s busy">Queued</span> <span class="s busy">Previewing</span></td><td>Waiting, or checking the cut. Up to 4 jobs run at once.</td><td>No</td></tr>
+<tr><td><span class="s busy">Splitting</span></td><td>The edit is being made. It takes from about 15 s for small segments to about 3 min for very large ones.</td><td>In progress</td></tr>
+<tr><td><span class="s good">Split</span></td><td>Done. The result lists the operation number (<em>Op</em>) and the new segment IDs, largest first, with their sizes in L2 nodes.</td><td>Yes</td></tr>
+<tr><td><span class="s bad">Preview failed</span></td><td>The preview found that the cut wouldn't be good enough, so it wasn't made. The result shows what the cut would have given.</td><td>No</td></tr>
+<tr><td><span class="s bad">Failed</span></td><td>Something went wrong before the edit. The result says what.</td><td>No</td></tr>
+<tr><td><span class="s bad">Split, sides not separated</span></td><td>The edit was made, but the two sides are still connected.</td><td>Yes</td></tr>
+<tr><td><span class="s bad">Outcome unknown</span></td><td>The request failed, but the edit may still have been applied. See below.</td><td>Maybe</td></tr>
+</table>
+<p>Every result has a <strong>Copy</strong> button. It copies the sample, segment, status and full message, including the complete server error if there was one. Use it when you report a problem.</p>
+
+<h2 id="problems">5. When something goes wrong</h2>
+<h3>Preview failed</h3>
+<p>Nothing was edited. A preview passes only if the cut is valid, cleanly separates the two sides, misses at most 1% of supervoxels, and the smaller piece has at least 10% of the segment. In the example above, "Would give 1103 / 41 L2" failed because 41 is under 10% of the total: the cut would only have shaved off a small piece. Such segments may need splitting by hand.</p>
+<h3>Failed</h3>
+<p>Nothing was edited. The message explains why: for example, the segment is too small (under 10 L2 nodes), or it is no longer the latest version because someone else edited it. In that case, paste in the newest ID. If it mentions an invalid or expired <strong>CAVE token</strong>, ask whoever runs the app to renew it. If the message is a server error you don't understand, press <strong>Copy</strong> and send it to whoever maintains the app.</p>
+<h3>Outcome unknown</h3>
+<p>The edit may or may not have been applied, for example because the server took too long to answer. The segment is blocked so it can't be edited twice. Wait a few minutes, then click <strong>Re-check</strong>:</p>
+<ul>
+<li>If the edit went through, the status becomes <span class="s good">Split</span> and lists the new IDs.</li>
+<li>If the segment hasn't changed, the status becomes <span class="s bad">Failed</span>, and you can start it again.</li>
+</ul>
+
+<h2 id="know">6. Good to know</h2>
+<ul>
+<li><strong>Segment IDs change with every edit.</strong> After a split, the old ID is out of date. Use the new IDs from the result.</li>
+<li><strong>Small fragments:</strong> a cut can leave a few tiny fragments besides the two large pieces. They aren't cut further.</li>
+<li><strong>Continuing a stopped branch:</strong> <strong>Re-check</strong> doesn't resume it. Paste the piece's ID in as a new job.</li>
+<li><strong>Undoing a split:</strong> edits can be undone by whoever maintains the app, using the operation number (<em>Op</em>) shown in the result. Undo newest first.</li>
+<li><strong>Stopping:</strong> there is no stop button. Stopping the app on the server stops new work. An edit already in progress still finishes on the CAVE server.</li>
+</ul>
+</main>
+</body>
+</html>
