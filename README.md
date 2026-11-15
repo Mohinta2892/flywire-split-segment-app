@@ -1,6 +1,6 @@
 # Developers
-Brewed by Michael Clayton
-Spiced by Samia Mohinta
+- Brewed by Michael Clayton
+- Spiced by Samia Mohinta
 
 # Segment splitter
 
