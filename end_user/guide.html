@@ -35,32 +35,35 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <body>
 <main>
 <h1>How to use the segment splitter</h1>
-<p class="lead">The segment splitter cuts large, wrongly merged segments into smaller pieces, so they are easier to proofread by hand.</p>
+<p class="lead">Proofread CAVE segmentations either by cutting large, wrongly merged segments into smaller pieces (<strong>Length-Based Auto Split</strong>) or by driving batch splits and merges from traced CATMAID skeletons (<strong>CATMAID-Driven Split &amp; Merge</strong>).</p>
 
-<div class="warn"><strong>Every split is a real, permanent edit</strong> to the segmentation that everyone works on. Each cut is checked with a preview before it is made, but double-check the segment ID before you press <strong>Start</strong>.</div>
+<div class="warn"><strong>Every split or merge is a real, permanent edit</strong> to the segmentation that everyone works on. Always check previews or dry-run plans before executing edits.</div>
 
 <nav class="toc"><strong>Contents</strong>
 <ol>
 <li><a href="#open">Open the app</a></li>
-<li><a href="#split">Split a segment</a></li>
-<li><a href="#rounds">Cut into more pieces with rounds</a></li>
-<li><a href="#progress">Follow the progress</a></li>
+<li><a href="#split">Tab 1: Split a segment (Length-Based Auto Split)</a></li>
+<li><a href="#rounds">Tab 1: Cut into more pieces with rounds</a></li>
+<li><a href="#progress">Tab 1: Follow the progress</a></li>
+<li><a href="#catmaid-setup">Tab 2: CATMAID-Driven Split &amp; Merge — First-time setup</a></li>
+<li><a href="#catmaid-batch">Tab 2: Preview and execute a CATMAID batch</a></li>
 <li><a href="#problems">When something goes wrong</a></li>
 <li><a href="#know">Good to know</a></li>
 </ol></nav>
 
 <h2 id="open">1. Open the app</h2>
 <p>The app runs on the lab's GPU server. Whoever starts it gets a link that looks like this:</p>
-<pre><code>http://127.0.0.1:8765/?token=y8F6Vic…</code></pre>
+<pre><code>http://127.0.0.1:8080/?token=y8F6Vic…</code></pre>
 <p>To open it from your own computer, first connect to the server with a tunnel, then open the link in your browser:</p>
-<pre><code>ssh -L 8765:localhost:8765 &lt;server&gt;</code></pre>
+<pre><code>ssh -L 8080:localhost:8080 &lt;server&gt;</code></pre>
 <ul>
 <li><strong>The token in the link is a password.</strong> Anyone with the link can make edits with the server's CAVE account, so don't share it or paste it in chat.</li>
-<li><strong>The link changes every time the app restarts.</strong> If the page says "Missing or wrong token", ask for the new link.</li>
+<li><strong>The link changes every time the app restarts.</strong> If the page says "Missing or wrong token", copy the new link printed in the terminal.</li>
+<li>Switch between <strong>Length-Based Auto Split</strong> and <strong>CATMAID-Driven Split &amp; Merge</strong> using the two tabs below the page title.</li>
 <li>Click <strong>How to use</strong> at the top right of the app at any time to open this guide.</li>
 </ul>
 
-<h2 id="split">2. Split a segment</h2>
+<h2 id="split">2. Tab 1: Split a segment (Length-Based Auto Split)</h2>
 <figure>
 <img src="screenshots/form.png" alt="The start form: Sample menu set to Parker-Goog, a segment ID typed in, Rounds set to 2, Preview first ticked, and the Start button.">
 <figcaption>The start form, filled in for a two-round split.</figcaption>
@@ -74,7 +77,7 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 </ol>
 <div class="note"><strong>Unticking "Preview first"</strong> skips the check and makes the edit straight away, after one confirmation. A bad cut then only shows up after the edit, so keep the preview on unless you have a reason not to.</div>
 
-<h2 id="rounds">3. Cut into more pieces with rounds</h2>
+<h2 id="rounds">3. Tab 1: Cut into more pieces with rounds</h2>
 <p>Each cut gives two large pieces. With more than one round, the app keeps going and cuts each of those pieces again:</p>
 <table>
 <tr><th>Rounds</th><th>What happens</th><th>Edits at most</th><th>Large pieces</th></tr>
@@ -84,7 +87,7 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 </table>
 <p>The hint under the form shows these numbers before you start. The maximum is 6 rounds. Every cut in the tree gets its own preview, and a branch stops on its own if its preview fails or a piece is too small (under 10 L2 nodes). The other branches carry on.</p>
 
-<h2 id="progress">4. Follow the progress</h2>
+<h2 id="progress">4. Tab 1: Follow the progress</h2>
 <figure>
 <img src="screenshots/progress.png" alt="The Progress table, listing jobs with their sample, segment, status and result. A two-round split shows its two pieces nested underneath it.">
 <figcaption>Example progress. The two-round split at the top shows its two pieces nested underneath it. One is done, and the other is still previewing.</figcaption>
@@ -98,28 +101,57 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <tr><td><span class="s bad">Preview failed</span></td><td>The preview found that the cut wouldn't be good enough, so it wasn't made. The result shows what the cut would have given.</td><td>No</td></tr>
 <tr><td><span class="s bad">Failed</span></td><td>Something went wrong before the edit. The result says what.</td><td>No</td></tr>
 <tr><td><span class="s bad">Split, sides not separated</span></td><td>The edit was made, but the two sides are still connected.</td><td>Yes</td></tr>
-<tr><td><span class="s bad">Outcome unknown</span></td><td>The request failed, but the edit may still have been applied. See below.</td><td>Maybe</td></tr>
+<tr><td><span class="s bad">Outcome unknown</span></td><td>The request failed, but the edit may still have applied. See below.</td><td>Maybe</td></tr>
 </table>
 <p>Every result has a <strong>Copy</strong> button. It copies the sample, segment, status and full message, including the complete server error if there was one. Use it when you report a problem.</p>
 
-<h2 id="problems">5. When something goes wrong</h2>
-<h3>Preview failed</h3>
+<h2 id="catmaid-setup">5. Tab 2: CATMAID-Driven Split &amp; Merge — First-time setup</h2>
+<p>Use the <strong>CATMAID-Driven Split &amp; Merge</strong> tab to compare traced CATMAID skeletons against CAVE segmentations, split false merges where one CAVE segment overlaps multiple CATMAID skeletons, and merge false splits where one CATMAID skeleton spans multiple CAVE segments.</p>
+<p>Your CAVE login is read automatically from your saved local CAVE secret (<code>CAVEclient().auth</code>), and sample names/datastacks are inherited from <code>config.json</code>. The <strong>first time</strong> you work with a sample (for example, <code>Parker-Goog</code> or <code>Parker_LSD</code>):</p>
+<ol>
+<li>Select the sample in <strong>Sample / Project Profile</strong>. The setup panel opens automatically if the project has not been saved yet.</li>
+<li>Enter your <strong>CATMAID Server URL</strong>, <strong>CATMAID Project ID</strong>, and <strong>CATMAID API Token</strong>.</li>
+<li>Click <strong>1. Connect &amp; Query Resolutions</strong>. The app queries both servers directly to detect the CAVE segmentation resolution (e.g., <code>16,16,16</code> nm) and available CATMAID stack resolutions (e.g., <code>8,8,16</code> nm).</li>
+<li>Confirm the selected CATMAID stack, resolutions, and coordinate unit (<code>nm</code> for standard CATMAID exports), then click <strong>2. Save Project Profile</strong>.</li>
+</ol>
+<div class="note"><strong>Saved locally:</strong> Your CATMAID token and volume resolutions are stored in <code>.cave_catmaid_config.json</code>. On all subsequent runs, selecting that sample loads everything automatically.</div>
+
+<h2 id="catmaid-batch">6. Tab 2: Preview and execute a CATMAID batch</h2>
+<ol>
+<li><strong>Load Skeletons:</strong> choose <strong>CATMAID Annotation</strong> (for example, an annotation covering a batch of 200 neurons) or enter comma-separated <strong>Skeleton IDs</strong>.</li>
+<li><strong>Min Nodes / Side:</strong> rows where either side has fewer internal nodes than this threshold (default <code>3</code>) are left unchecked in the approval tables so minor boundary jitter does not trigger unwanted edits.</li>
+<li>Click <strong>Download &amp; Build Dry-Run Plan</strong>. The app downloads skeletons locally as SWC files (cached under <code>data/catmaid_skeletons/&lt;project&gt;/</code>), strips out end (leaf) nodes while keeping all remaining manually placed nodes, and maps coordinates to live CAVE root IDs. Tick <strong>Re-download SWCs</strong> if skeletons were updated in CATMAID.</li>
+<li><strong>Review the triage plan:</strong>
+<ul>
+<li><strong>Clean 1-to-1:</strong> skeletons that already match a single CAVE segment with no overlaps from other skeletons.</li>
+<li><strong>Planned Splits:</strong> CAVE root IDs overlapped by two or more CATMAID skeletons. Uncheck any row you want to skip.</li>
+<li><strong>Planned Merges:</strong> CATMAID skeletons spanning two or more CAVE root IDs. Uncheck any row you want to skip.</li>
+</ul>
+</li>
+<li><strong>Inspect a cut in 3D:</strong> click <strong>Preview 3D</strong> on any row in <strong>Planned Splits</strong> to run a read-only CAVE <code>preview_split</code> and open a <strong>Neuroglancer</strong> link showing source nodes in green and sink nodes in red.</li>
+<li>Click <strong>Execute Approved Splits &amp; Merges in CAVE</strong>. The app executes all checked <strong>splits first</strong>, refreshes live CAVE root IDs, and then executes all checked <strong>merges</strong> using the closest pair of internal skeleton nodes between fragments.</li>
+</ol>
+
+<h2 id="problems">7. When something goes wrong</h2>
+<h3>Preview failed (Tab 1)</h3>
 <p>Nothing was edited. A preview passes only if the cut is valid, cleanly separates the two sides, misses at most 1% of supervoxels, and the smaller piece has at least 10% of the segment. In the example above, "Would give 1103 / 41 L2" failed because 41 is under 10% of the total: the cut would only have shaved off a small piece. Such segments may need splitting by hand.</p>
 <h3>Failed</h3>
-<p>Nothing was edited. The message explains why: for example, the segment is too small (under 10 L2 nodes), or it is no longer the latest version because someone else edited it. In that case, paste in the newest ID. If it mentions an invalid or expired <strong>CAVE token</strong>, ask whoever runs the app to renew it. If the message is a server error you don't understand, press <strong>Copy</strong> and send it to whoever maintains the app.</p>
-<h3>Outcome unknown</h3>
+<p>Nothing was edited. The message explains why: for example, the segment is too small (under 10 L2 nodes), or it is no longer the latest version because someone else edited it. In that case, paste in the newest ID. If it mentions an invalid or expired <strong>CAVE token</strong>, renew it with <code>CAVEclient(...).auth.get_new_token()</code> and <code>auth.save_token(...)</code>. If a CATMAID query fails, open <strong>Edit CATMAID / Resolution Setup</strong> in Tab 2 to verify your CATMAID API token and stack resolution. For server errors you don't understand, press <strong>Copy</strong> and send it to whoever maintains the app.</p>
+<h3>Outcome unknown (Tab 1)</h3>
 <p>The edit may or may not have been applied, for example because the server took too long to answer. The segment is blocked so it can't be edited twice. Wait a few minutes, then click <strong>Re-check</strong>:</p>
 <ul>
 <li>If the edit went through, the status becomes <span class="s good">Split</span> and lists the new IDs.</li>
 <li>If the segment hasn't changed, the status becomes <span class="s bad">Failed</span>, and you can start it again.</li>
 </ul>
 
-<h2 id="know">6. Good to know</h2>
+<h2 id="know">8. Good to know</h2>
 <ul>
-<li><strong>Segment IDs change with every edit.</strong> After a split, the old ID is out of date. Use the new IDs from the result.</li>
-<li><strong>Small fragments:</strong> a cut can leave a few tiny fragments besides the two large pieces. They aren't cut further.</li>
-<li><strong>Continuing a stopped branch:</strong> <strong>Re-check</strong> doesn't resume it. Paste the piece's ID in as a new job.</li>
-<li><strong>Undoing a split:</strong> edits can be undone by whoever maintains the app, using the operation number (<em>Op</em>) shown in the result. Undo newest first.</li>
+<li><strong>Segment IDs change with every edit.</strong> After a split or merge, the old ID is out of date. Use the new IDs from the result or audit log.</li>
+<li><strong>End nodes excluded in CATMAID mode:</strong> terminal leaf nodes are dropped before comparing with CAVE because manual tips frequently extend slightly past a membrane boundary into a neighboring cell. All branch, soma, and backbone nodes are kept.</li>
+<li><strong>Local SWC caching:</strong> downloaded CATMAID skeletons are cached locally so re-building plans with different node thresholds is fast. Tick <strong>Re-download SWCs</strong> after editing tracings in CATMAID.</li>
+<li><strong>Small fragments (Tab 1):</strong> a cut can leave a few tiny fragments besides the two large pieces. They aren't cut further.</li>
+<li><strong>Continuing a stopped branch (Tab 1):</strong> <strong>Re-check</strong> doesn't resume it. Paste the piece's ID in as a new job.</li>
+<li><strong>Undoing a split or merge:</strong> edits can be undone by whoever maintains the app, using the operation number (<em>Op</em>) shown in the result or recorded in <code>outputs/proofreading_audit_log_&lt;project&gt;.csv</code>. Undo newest first.</li>
 <li><strong>Stopping:</strong> there is no stop button. Stopping the app on the server stops new work. An edit already in progress still finishes on the CAVE server.</li>
 </ul>
 </main>

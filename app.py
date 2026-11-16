@@ -1,6 +1,7 @@
-"""Web page for splitting segments. The Split action makes REAL chunkedgraph edits. See README.md."""
+"""Web page for splitting and CATMAID-driven proofreading of segments. Makes REAL chunkedgraph edits. See README.md."""
 import argparse, concurrent.futures, hmac, json, os, re, secrets, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import splitter as bs
@@ -8,6 +9,7 @@ import splitter as bs
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_PATH = os.path.join(HERE, "config.json")  # samples for the menu and the CAVE server: see README.md
+CATMAID_CONFIG_PATH = Path(os.path.join(HERE, ".cave_catmaid_config.json"))
 SAMPLES, SERVER = {}, ""  # sample name -> datastack name, and the CAVE global server, both set by load_config()
 RUNNING = {"queued", "previewing", "splitting"}
 MAX_ROUNDS = 6  # 63 edits at most from one segment
@@ -17,6 +19,19 @@ GUIDE_DIR = os.path.join(HERE, "end_user")  # guide.html and its screenshots, al
 jobs = []  # root IDs are strings: they don't fit in a JS number
 lock = threading.RLock()
 pool = concurrent.futures.ThreadPoolExecutor(4)
+
+catmaid_state = {
+    "status": "idle",       # idle | loading | ready | executing | done | failed
+    "message": "",
+    "detail": "",
+    "progress": "",
+    "project": None,
+    "summary": None,
+    "splits": [],
+    "merges": [],
+    "audit": [],
+    "mapped_df": None,
+}
 
 
 def load_config(path):
@@ -181,6 +196,303 @@ def act(job_id, action):
     return 200, ""
 
 
+# --- CATMAID-DRIVEN PROOFREADING BACKEND HELPERS ---
+
+def _cm_update(**kw):
+    with lock:
+        catmaid_state.update(kw)
+
+
+def _cm_public_state():
+    from catmaid_cave_sync.config import load_all_configs
+    store = load_all_configs(CATMAID_CONFIG_PATH)
+    safe_projects = {}
+    for name, cfg in store.get("projects", {}).items():
+        safe_projects[name] = {
+            "cave_datastack": cfg.get("cave_datastack", ""),
+            "cave_server_address": cfg.get("cave_server_address", SERVER),
+            "cave_resolution_nm": cfg.get("cave_resolution_nm", []),
+            "catmaid_url": cfg.get("catmaid_url", ""),
+            "catmaid_project_id": cfg.get("catmaid_project_id", 1),
+            "catmaid_resolution_nm": cfg.get("catmaid_resolution_nm", []),
+            "catmaid_coord_unit": cfg.get("catmaid_coord_unit", "nm"),
+        }
+    with lock:
+        return {
+            "status": catmaid_state["status"],
+            "message": catmaid_state["message"],
+            "detail": catmaid_state["detail"],
+            "progress": catmaid_state["progress"],
+            "project": catmaid_state["project"],
+            "summary": catmaid_state["summary"],
+            "splits": catmaid_state["splits"],
+            "merges": catmaid_state["merges"],
+            "audit": catmaid_state["audit"],
+            "active_project": store.get("active_project"),
+            "projects": safe_projects,
+            "default_server": SERVER,
+            "sample_datastacks": SAMPLES,
+        }
+
+
+def _cm_init_cave_client(cfg):
+    from caveclient import CAVEclient
+    srv = cfg.get("cave_server_address") or SERVER
+    kwargs = {"datastack_name": cfg["cave_datastack"]}
+    if srv:
+        kwargs["server_address"] = srv
+    return CAVEclient(**kwargs)
+
+
+def cm_probe_resolutions(d):
+    """First-time project probe: connect to CAVE (via saved local secret) & CATMAID and query stack resolutions."""
+    try:
+        from caveclient import CAVEclient
+        import pymaid
+        from catmaid_cave_sync.config import query_cave_resolution, query_catmaid_stacks
+
+        ds = (d.get("cave_datastack") or "").strip()
+        cave_srv = (d.get("cave_server_address") or SERVER).strip()
+        cm_url = (d.get("catmaid_url") or "").strip()
+        cm_pid = int(d.get("catmaid_project_id") or 1)
+        cm_tok = (d.get("catmaid_token") or "").strip()
+        if not (ds and cm_url and cm_tok):
+            return 400, {"error": "Select a sample/datastack and enter your CATMAID URL and CATMAID API token first."}
+
+        kwargs = {"datastack_name": ds}
+        if cave_srv:
+            kwargs["server_address"] = cave_srv
+        cave_client = CAVEclient(**kwargs)
+        rm = pymaid.CatmaidInstance(server=cm_url, api_token=cm_tok, project_id=cm_pid)
+
+        cave_res = query_cave_resolution(cave_client)
+        stacks = query_catmaid_stacks(rm)
+        return 200, {"cave_resolution_nm": cave_res, "catmaid_stacks": stacks}
+    except Exception as exc:
+        return 400, {"error": brief(exc)}
+
+
+def cm_save_project(d):
+    """Save a project profile (CATMAID token + queried resolutions) locally to .cave_catmaid_config.json."""
+    try:
+        from catmaid_cave_sync.config import load_all_configs, save_project_config
+
+        name = (d.get("project_name") or "").strip()
+        if not name:
+            return 400, {"error": "Select or enter a project/sample name first (e.g., Parker-Goog)."}
+
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        existing = store.get("projects", {}).get(name, {})
+
+        cave_res = [float(x) for x in d.get("cave_resolution_nm", [])]
+        cm_res = [float(x) for x in d.get("catmaid_resolution_nm", [])]
+        if len(cave_res) != 3 or len(cm_res) != 3 or any(v <= 0 for v in cave_res + cm_res):
+            return 400, {"error": "Both CAVE and CATMAID resolutions must have 3 positive numbers (x,y,z nm)."}
+
+        cm_tok = (d.get("catmaid_token") or "").strip() or existing.get("catmaid_token", "")
+        if not cm_tok:
+            return 400, {"error": "CATMAID API token is required."}
+
+        ds = (d.get("cave_datastack") or "").strip() or SAMPLES.get(name, "")
+        if not ds:
+            return 400, {"error": "CAVE datastack name is required."}
+
+        cfg = {
+            "cave_datastack": ds,
+            "cave_server_address": (d.get("cave_server_address") or SERVER).strip(),
+            "cave_resolution_nm": cave_res,
+            "catmaid_url": (d.get("catmaid_url") or "").strip(),
+            "catmaid_project_id": int(d.get("catmaid_project_id") or 1),
+            "catmaid_token": cm_tok,
+            "catmaid_resolution_nm": cm_res,
+            "catmaid_coord_unit": d.get("catmaid_coord_unit") or "nm",
+        }
+        save_project_config(name, cfg, CATMAID_CONFIG_PATH)
+        return 200, {"ok": True}
+    except Exception as exc:
+        return 400, {"error": brief(exc)}
+
+
+def _run_cm_plan_worker(project_name, mode, query_val, min_nodes, force_refresh):
+    try:
+        import pymaid
+        from catmaid_cave_sync.config import load_all_configs
+        from catmaid_cave_sync.catmaid_loader import fetch_and_cache_skeletons, extract_non_end_nodes
+        from catmaid_cave_sync.spatial_mapper import map_nodes_to_cave
+        from catmaid_cave_sync.planner import build_proofreading_plan
+
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        cfg = store["projects"][project_name]
+        cave_client = _cm_init_cave_client(cfg)
+        pymaid.CatmaidInstance(
+            server=cfg["catmaid_url"],
+            api_token=cfg["catmaid_token"],
+            project_id=int(cfg["catmaid_project_id"]),
+        )
+
+        skids_or_ann = (
+            query_val.strip()
+            if mode == "annotation"
+            else [int(x.strip()) for x in query_val.split(",") if x.strip()]
+        )
+        cache_dir = Path(HERE) / "data" / "catmaid_skeletons" / project_name
+
+        _cm_update(progress="Downloading / loading local CATMAID SWC skeletons...")
+        neurons = fetch_and_cache_skeletons(skids_or_ann, cache_dir=cache_dir, force_refresh=force_refresh)
+        if len(neurons) == 0:
+            _cm_update(status="failed", message="No CATMAID skeletons matched your query.", progress="")
+            return
+
+        _cm_update(progress=f"Filtering non-end nodes across {len(neurons)} skeletons & mapping CAVE roots...")
+        internal_nodes = extract_non_end_nodes(neurons)
+        mapped_df = map_nodes_to_cave(
+            internal_nodes,
+            cave_client,
+            catmaid_resolution_nm=cfg["catmaid_resolution_nm"],
+            cave_resolution_nm=cfg["cave_resolution_nm"],
+            catmaid_coord_unit=cfg.get("catmaid_coord_unit", "nm"),
+        )
+        summary, splits_df, merges_df = build_proofreading_plan(mapped_df, min_support_nodes=min_nodes)
+
+        splits_list = splits_df.to_dict(orient="records") if not splits_df.empty else []
+        for row in splits_list:
+            row["target_root_id"] = str(row["target_root_id"])
+
+        merges_list = merges_df.to_dict(orient="records") if not merges_df.empty else []
+        for row in merges_list:
+            row["primary_root_id"] = str(row["primary_root_id"])
+            row["fragment_root_id"] = str(row["fragment_root_id"])
+
+        _cm_update(
+            status="ready",
+            message=f"Loaded {summary.get('total_skeletons', 0)} skeletons ({summary.get('total_mapped_nodes', 0)} internal nodes mapped).",
+            detail="",
+            progress="",
+            project=project_name,
+            summary=summary,
+            splits=splits_list,
+            merges=merges_list,
+            audit=[],
+            mapped_df=mapped_df,
+        )
+    except Exception as exc:
+        _cm_update(status="failed", message=f"Plan failed: {brief(exc)}", detail=str(exc)[:20000], progress="")
+
+
+def cm_start_plan(d):
+    with lock:
+        if catmaid_state["status"] in ("loading", "executing"):
+            return 409, {"error": "A CATMAID batch job is already running."}
+        project_name = (d.get("project_name") or "").strip()
+        mode = d.get("mode") or "annotation"
+        query_val = (d.get("query") or "").strip()
+        min_nodes = int(d.get("min_nodes") or 3)
+        force_refresh = bool(d.get("force_refresh"))
+        if not project_name:
+            return 400, {"error": "Select or configure a sample/project profile first."}
+        if not query_val:
+            return 400, {"error": "Enter a CATMAID annotation name or skeleton IDs."}
+        _cm_update(status="loading", message="", detail="", progress="Starting...", project=project_name)
+    pool.submit(_run_cm_plan_worker, project_name, mode, query_val, min_nodes, force_refresh)
+    return 200, {"ok": True}
+
+
+def cm_preview_single_split(d):
+    try:
+        from catmaid_cave_sync.config import load_all_configs
+        from catmaid_cave_sync.planner import preview_single_split
+
+        with lock:
+            mapped_df = catmaid_state.get("mapped_df")
+            project_name = catmaid_state.get("project")
+        if mapped_df is None or not project_name:
+            return 400, {"error": "Build a proofreading plan first."}
+
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        cfg = store["projects"][project_name]
+        cave_client = _cm_init_cave_client(cfg)
+
+        res = preview_single_split(
+            mapped_df,
+            cave_client,
+            root_id=int(d["target_root_id"]),
+            source_skid=int(d["source_skid"]),
+            sink_skids=[int(x) for x in str(d["sink_skids"]).split(",") if x.strip()],
+            cave_resolution_nm=tuple(cfg["cave_resolution_nm"]),
+        )
+        return 200, res
+    except Exception as exc:
+        return 400, {"error": brief(exc)}
+
+
+def _run_cm_execute_worker(project_name, mapped_df, splits_rows, merges_rows):
+    try:
+        import pandas as pd
+        from catmaid_cave_sync.config import load_all_configs
+        from catmaid_cave_sync.cave_editor import execute_approved_edits
+
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        cfg = store["projects"][project_name]
+        cave_client = _cm_init_cave_client(cfg)
+
+        splits_df = pd.DataFrame(splits_rows)
+        if not splits_df.empty:
+            splits_df["target_root_id"] = splits_df["target_root_id"].astype("int64")
+
+        merges_df = pd.DataFrame(merges_rows)
+        if not merges_df.empty:
+            merges_df["primary_root_id"] = merges_df["primary_root_id"].astype("int64")
+            merges_df["fragment_root_id"] = merges_df["fragment_root_id"].astype("int64")
+
+        def _cb(step, total, msg):
+            _cm_update(progress=f"[{step}/{total}] {msg}")
+
+        out_dir = Path(HERE) / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = out_dir / f"proofreading_audit_log_{project_name}.csv"
+
+        audit_df = execute_approved_edits(
+            mapped_df,
+            splits_df,
+            merges_df,
+            cave_client,
+            cave_resolution_nm=tuple(cfg["cave_resolution_nm"]),
+            audit_log_path=audit_path,
+            progress_callback=_cb,
+        )
+        audit_list = audit_df.fillna("").to_dict(orient="records") if not audit_df.empty else []
+        for row in audit_list:
+            row["old_root_id"] = str(row.get("old_root_id", ""))
+            row["new_root_ids"] = str(row.get("new_root_ids", ""))
+
+        _cm_update(
+            status="done",
+            message=f"Batch complete ({len(audit_list)} edits processed). Audit saved to outputs/{audit_path.name}.",
+            detail="",
+            progress="",
+            audit=audit_list,
+        )
+    except Exception as exc:
+        _cm_update(status="failed", message=f"Batch execution failed: {brief(exc)}", detail=str(exc)[:20000], progress="")
+
+
+def cm_start_execute(d):
+    with lock:
+        if catmaid_state["status"] in ("loading", "executing"):
+            return 409, {"error": "A CATMAID batch job is already running."}
+        mapped_df = catmaid_state.get("mapped_df")
+        project_name = catmaid_state.get("project")
+        if mapped_df is None or not project_name:
+            return 400, {"error": "Build a proofreading plan first."}
+        splits_rows = d.get("splits") or []
+        merges_rows = d.get("merges") or []
+        if not any(r.get("approve") for r in splits_rows + merges_rows):
+            return 400, {"error": "Approve at least one split or merge row first."}
+        _cm_update(status="executing", message="", detail="", progress="Starting CAVE edits...", splits=splits_rows, merges=merges_rows)
+    pool.submit(_run_cm_execute_worker, project_name, mapped_df, splits_rows, merges_rows)
+    return 200, {"ok": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass  # default logging would print the token
 
@@ -205,6 +517,9 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/state":
             if self.authorised(self.headers.get("X-Token", "")):
                 with lock: self.reply(200, {"jobs": jobs, "samples": list(SAMPLES), "max_rounds": MAX_ROUNDS, "now": time.time()})
+        elif url.path == "/api/catmaid/state":
+            if self.authorised(self.headers.get("X-Token", "")):
+                self.reply(200, _cm_public_state())
         else:
             self.reply(404, {"error": "Not found"})
 
@@ -212,22 +527,45 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised(self.headers.get("X-Token", "")): return
         try:
             n = int(self.headers.get("Content-Length", 0))
-            if n > 10000: raise ValueError
+            if n > 2_000_000: raise ValueError
             d = json.loads(self.rfile.read(n))
         except ValueError:
             return self.reply(400, {"error": "Bad request"})
         path = urlparse(self.path).path
-        if path == "/api/start": code, err = start(d.get("sample"), d.get("root"), d.get("preview"), d.get("rounds", 1))
-        elif path == "/api/act": code, err = act(d.get("id"), d.get("action"))
-        else: code, err = 404, "Not found"
-        self.reply(code, {"error": err})
+        if path == "/api/start":
+            code, err = start(d.get("sample"), d.get("root"), d.get("preview"), d.get("rounds", 1))
+            self.reply(code, {"error": err})
+        elif path == "/api/act":
+            code, err = act(d.get("id"), d.get("action"))
+            self.reply(code, {"error": err})
+        elif path == "/api/catmaid/probe":
+            code, payload = cm_probe_resolutions(d)
+            self.reply(code, payload)
+        elif path == "/api/catmaid/save_project":
+            code, payload = cm_save_project(d)
+            self.reply(code, payload)
+        elif path == "/api/catmaid/plan":
+            code, payload = cm_start_plan(d)
+            self.reply(code, payload)
+        elif path == "/api/catmaid/preview_split":
+            code, payload = cm_preview_single_split(d)
+            self.reply(code, payload)
+        elif path == "/api/catmaid/execute":
+            code, payload = cm_start_execute(d)
+            self.reply(code, payload)
+        else:
+            self.reply(404, {"error": "Not found"})
 
 
-PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Segment splitter</title><style>
+PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Segment splitter & CATMAID proofreading</title><style>
 *{box-sizing:border-box}body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#f4f5f7;color:#1c2330}
 main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:28px 0 10px}
-.sub,.hint{color:#5b6472}.sub{margin:2px 0 20px}.hint{margin:12px 0 0;font-size:13px}
-.card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card{padding:18px 20px}.scroll{overflow-x:auto}
+.sub,.hint{color:#5b6472}.sub{margin:2px 0 16px}.hint{margin:12px 0 0;font-size:13px}
+.tabs{display:flex;gap:8px;border-bottom:1px solid #d5dae2;margin-bottom:20px}
+.tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;height:auto;font-weight:600;color:#5b6472}
+.tab:hover{background:transparent;color:#1c2330}.tab.active{color:#2b59c3;border-bottom-color:#2b59c3}
+.panel{display:none}.panel.active{display:block}
+.card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card,div.pad{padding:18px 20px}.scroll{overflow-x:auto}
 .fields{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap}label{display:grid;gap:4px;font-size:12px;font-weight:600;color:#5b6472}
 label.check{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:400;color:inherit;height:34px}
 input:not([type=checkbox]),select{font:inherit;font-weight:400;color:inherit;height:34px;padding:0 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff}#root{width:220px}#rounds{width:76px}
@@ -238,15 +576,91 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
 .s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}
 .copy{height:22px;padding:0 8px;margin-left:8px;font-size:12px;color:#5b6472;vertical-align:baseline}.msg{user-select:text}
 .top{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.helplink{color:#2b59c3;font-weight:500;text-decoration:none}.helplink:hover{text-decoration:underline}
-#err{color:#b3261e;margin-top:10px}#err:empty{display:none}td:first-child{white-space:nowrap}
+#err,#cm-err{color:#b3261e;margin-top:10px}#err:empty,#cm-err:empty{display:none}td:first-child{white-space:nowrap}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0}
+.metric{background:#fff;border:1px solid #e1e4e9;border-radius:8px;padding:12px 16px}.metric .v{font-size:20px;font-weight:600;margin-top:2px}
+.box{border:1px solid #d5dae2;border-radius:8px;padding:14px 16px;margin-top:14px;background:#fafbfc}.hide{display:none}
+.ngl{display:inline-block;margin-left:8px;color:#2b59c3;font-weight:500;text-decoration:none}.ngl:hover{text-decoration:underline}
 </style></head><body><main>
-<div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split is a real chunkedgraph edit.</p>
+<div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split or merge is a real chunkedgraph edit.</p>
+
+<nav class="tabs" role="tablist">
+  <button type="button" class="tab active" data-tab="auto">Length-Based Auto Split</button>
+  <button type="button" class="tab" data-tab="catmaid">CATMAID-Driven Split &amp; Merge</button>
+</nav>
+
+<section id="panel-auto" class="panel active">
 <form id="f" class="card"><div class="fields"><label>Sample <select id="sample"></select></label>
 <label>Segment <input id="root" required inputmode="numeric" autocomplete="off"></label>
 <label>Rounds <input id="rounds" type="number" min="1" value="1" required></label>
 <label class="check"><input id="preview" type="checkbox" checked> Preview first</label><button class="primary">Start</button></div>
 <p id="hint" class="hint"></p><div id="err" role="alert"></div></form>
 <h2>Progress</h2><div class="card scroll"><table id="jobs"></table></div>
+</section>
+
+<section id="panel-catmaid" class="panel">
+  <div class="card pad">
+    <div class="fields">
+      <label>Sample / Project Profile <select id="cm-proj"></select></label>
+      <button type="button" id="cm-toggle-setup">Edit CATMAID / Resolution Setup</button>
+    </div>
+    <p id="cm-proj-info" class="hint"></p>
+
+    <div id="cm-setup-box" class="box hide">
+      <div class="fields">
+        <label>Project Name <input id="cm-name" placeholder="e.g. Parker-Goog"></label>
+        <label>CAVE Datastack <input id="cm-ds" style="width:320px" placeholder="From config.json"></label>
+        <label>CAVE Server URL <input id="cm-srv" style="width:320px" placeholder="From config.json"></label>
+      </div>
+      <div class="fields" style="margin-top:12px">
+        <label>CATMAID Server URL <input id="cm-url" style="width:260px" placeholder="https://catmaid.example.org"></label>
+        <label>CATMAID Project ID <input id="cm-pid" type="number" min="1" value="1" style="width:110px"></label>
+        <label>CATMAID API Token <input id="cm-tok" type="password" placeholder="Leave blank to keep saved"></label>
+        <button type="button" id="cm-probe">1. Connect &amp; Query Resolutions</button>
+      </div>
+      <div id="cm-res-box" class="fields" style="margin-top:12px">
+        <label>CATMAID Stack <select id="cm-stack"><option value="">Query server or enter below</option></select></label>
+        <label>CATMAID Resolution (x,y,z nm) <input id="cm-res" placeholder="Queried from server"></label>
+        <label>CAVE Resolution (x,y,z nm) <input id="cm-cave-res" placeholder="Queried from server"></label>
+        <label>CATMAID Coord Unit <select id="cm-unit"><option value="nm">nm</option><option value="voxels">voxels</option></select></label>
+        <button type="button" id="cm-save-proj" class="primary">2. Save Project Profile</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div class="fields">
+      <label>Load Skeletons By <select id="cm-mode"><option value="annotation">CATMAID Annotation</option><option value="skids">Skeleton IDs (comma-separated)</option></select></label>
+      <label>Annotation or Skeleton IDs <input id="cm-query" style="width:300px" placeholder="e.g. Parker_batch_1 or 12345, 67890"></label>
+      <label>Min Nodes / Side <input id="cm-min-nodes" type="number" min="1" value="3" style="width:95px"></label>
+      <label class="check"><input id="cm-refresh" type="checkbox"> Re-download SWCs</label>
+      <button type="button" id="cm-plan-btn" class="primary">Download &amp; Build Dry-Run Plan</button>
+    </div>
+    <p id="cm-status" class="hint"></p>
+    <div id="cm-err" role="alert"></div>
+  </div>
+
+  <div id="cm-results" class="hide">
+    <div class="metrics" id="cm-metrics"></div>
+
+    <h2>Planned Splits (CAVE roots overlapping &gt;1 CATMAID skeleton)</h2>
+    <div class="card scroll"><table id="cm-splits-tbl"></table></div>
+
+    <h2>Planned Merges (CATMAID skeletons spanning &gt;1 CAVE root)</h2>
+    <div class="card scroll"><table id="cm-merges-tbl"></table></div>
+
+    <div style="margin-top:16px;display:flex;gap:12px;align-items:center">
+      <button type="button" id="cm-exec-btn" class="danger">Execute Approved Splits &amp; Merges in CAVE</button>
+      <span class="hint" style="margin:0">Executes all checked splits first, refreshes roots, then executes checked merges.</span>
+    </div>
+
+    <div id="cm-audit-wrap" class="hide">
+      <h2>Execution Audit Log</h2>
+      <div class="card scroll"><table id="cm-audit-tbl"></table></div>
+    </div>
+  </div>
+</section>
+
 <script>
 const T=new URLSearchParams(location.search).get('token'),$=i=>document.getElementById(i);$('help').href='help?token='+encodeURIComponent(T);
 const api=async(p,b)=>{const r=await fetch(p,{method:b?'POST':'GET',headers:{'X-Token':T},body:b&&JSON.stringify(b)});const j=await r.json();
@@ -276,7 +690,7 @@ function row(j,now,depth){const r=el('tr'),seg=el('td',null,'id'),st=el('td'),a=
   b.onclick=()=>copyText(`${j.sample} ${j.root} ${LABEL[j.status]||j.status}\n${j.message}`+(j.detail?`\n\nFull error:\n${j.detail}`:''),b);m.append(b)}
  r.append(el('td',j.sample),seg,st,m,a);return r}
 const selecting=()=>{const s=getSelection();return s&&!s.isCollapsed&&$('jobs').contains(s.anchorNode)};
-async function draw(){const d=await api('/api/state');if(selecting())return;/* a redraw would drop the text being selected */const s=$('sample');if(!s.options.length)for(const x of d.samples)s.append(new Option(x,x));$('rounds').max=d.max_rounds;
+async function draw(){const d=await api('/api/state');if(selecting())return;const s=$('sample');if(!s.options.length)for(const x of d.samples)s.append(new Option(x,x));$('rounds').max=d.max_rounds;
  const t=$('jobs'),h=el('tr');for(const x of['Sample','Segment','Status','Result',''])h.append(el('th',x));t.replaceChildren(h);
  if(!d.jobs.length){const r=el('tr'),c=el('td','Nothing yet.','msg');c.colSpan=5;r.append(c);t.append(r)}
  const kids={};for(const j of d.jobs)(kids[j.parent]??=[]).push(j);
@@ -286,6 +700,168 @@ $('f').oninput=hint;hint();
 $('f').onsubmit=e=>{e.preventDefault();safe(async()=>{const root=$('root').value.trim(),preview=$('preview').checked,rounds=+$('rounds').value;if(!preview&&!edit(root,rounds))return;
  await api('/api/start',{sample:$('sample').value,root,preview,rounds});$('root').value=''})()};
 draw().catch(e=>$('err').textContent=e.message);setInterval(()=>draw().catch(e=>$('err').textContent='Lost contact with the server: '+e.message),3000);
+
+/* Tab switching and CATMAID-driven proofreading logic */
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');$('panel-'+b.dataset.tab).classList.add('active');
+});
+
+let cmCache=null,cmSplits=[],cmMerges=[],cmRenderedKey='',cmConfiguredSet=new Set();
+const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('cm-err').textContent=e.message}};
+
+function fillProjectForm(name,d){
+  const projects=d.projects||{},samples=d.sample_datastacks||{},defaultSrv=d.default_server||'';
+  const cfg=projects[name];
+  if(!cfg){
+    $('cm-name').value=(name&&name!=='+ Custom Project')?name:'';
+    $('cm-ds').value=samples[name]||'';
+    $('cm-srv').value=defaultSrv;
+    $('cm-url').value='';$('cm-pid').value='1';$('cm-tok').value='';
+    $('cm-res').value='';$('cm-cave-res').value='';$('cm-unit').value='nm';
+    $('cm-proj-info').textContent=`First-time setup for "${name||'new project'}": enter your CATMAID credentials below and click Connect & Query Resolutions.`;
+    $('cm-setup-box').classList.remove('hide');
+    return;
+  }
+  $('cm-name').value=name;$('cm-ds').value=cfg.cave_datastack||samples[name]||'';$('cm-srv').value=cfg.cave_server_address||defaultSrv;
+  $('cm-url').value=cfg.catmaid_url||'';$('cm-pid').value=cfg.catmaid_project_id||1;$('cm-tok').value='';
+  $('cm-res').value=(cfg.catmaid_resolution_nm||[]).join(',');$('cm-cave-res').value=(cfg.cave_resolution_nm||[]).join(',');
+  $('cm-unit').value=cfg.catmaid_coord_unit||'nm';
+  $('cm-proj-info').textContent=`Loaded saved profile: ${name} | Datastack: ${$('cm-ds').value} | CATMAID res: [${$('cm-res').value}] nm | CAVE res: [${$('cm-cave-res').value}] nm`;
+}
+
+function renderCatmaidTables(d){
+  const key=JSON.stringify([d.status,d.summary,d.splits.length,d.merges.length,d.audit.length]);
+  if(key===cmRenderedKey)return;
+  cmRenderedKey=key;
+  if(!d.summary){$('cm-results').classList.add('hide');return}
+  $('cm-results').classList.remove('hide');
+  cmSplits=d.splits.map(x=>({...x}));cmMerges=d.merges.map(x=>({...x}));
+
+  const m=$('cm-metrics');m.replaceChildren();
+  [['Skeletons Loaded',d.summary.total_skeletons],['Clean 1-to-1',d.summary.clean_1to1_skeletons],
+   ['Planned Splits',d.summary.planned_splits],['Planned Merges',d.summary.planned_merges]].forEach(([lbl,val])=>{
+    const c=el('div',null,'metric');c.append(el('div',lbl,'hint'),el('div',String(val),'v'));m.append(c);
+  });
+
+  const st=$('cm-splits-tbl'),sh=el('tr');
+  ['Approve','CAVE Root ID','Source Skid','Sink Skids','Source / Sink Nodes','3D Preview'].forEach(x=>sh.append(el('th',x)));
+  st.replaceChildren(sh);
+  if(!cmSplits.length){const r=el('tr'),c=el('td','No false merges detected (0 splits needed).','msg');c.colSpan=6;r.append(c);st.append(r)}
+  cmSplits.forEach((row,idx)=>{
+    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;cb.onchange=()=>cmSplits[idx].approve=cb.checked;
+    const tdCb=el('td');tdCb.append(cb);
+    const tdAct=el('td'),out=el('span',null,'msg');
+    const pb=el('button','Preview 3D');
+    pb.onclick=cmSafe(async()=>{
+      pb.disabled=true;out.textContent=' Querying CAVE...';
+      try{
+        const res=await api('/api/catmaid/preview_split',row);
+        out.textContent=res.split_valid?` Valid (${res.predicted_component_count} pieces)`:' Invalid cut';
+        const a=el('a','Open Neuroglancer','ngl');a.href=res.neuroglancer_url;a.target='_blank';a.rel='noopener';out.append(a);
+      }finally{pb.disabled=false}
+    });
+    tdAct.append(pb,out);
+    r.append(tdCb,el('td',row.target_root_id,'id'),el('td',String(row.source_skid),'id'),el('td',String(row.sink_skids),'id'),
+             el('td',`${row.source_nodes} / ${row.sink_nodes}`),tdAct);
+    st.append(r);
+  });
+
+  const mt=$('cm-merges-tbl'),mh=el('tr');
+  ['Approve','CATMAID Skid','Primary Root ID','Fragment Root ID','Primary / Fragment Nodes'].forEach(x=>mh.append(el('th',x)));
+  mt.replaceChildren(mh);
+  if(!cmMerges.length){const r=el('tr'),c=el('td','No false splits detected (0 merges needed).','msg');c.colSpan=5;r.append(c);mt.append(r)}
+  cmMerges.forEach((row,idx)=>{
+    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;cb.onchange=()=>cmMerges[idx].approve=cb.checked;
+    const tdCb=el('td');tdCb.append(cb);
+    r.append(tdCb,el('td',String(row.skeleton_id),'id'),el('td',row.primary_root_id,'id'),el('td',row.fragment_root_id,'id'),
+             el('td',`${row.primary_nodes} / ${row.fragment_nodes}`));
+    mt.append(r);
+  });
+
+  if(d.audit&&d.audit.length){
+    $('cm-audit-wrap').classList.remove('hide');
+    const at=$('cm-audit-tbl'),ah=el('tr');
+    ['Action','Status','Skeleton ID','Old Root','New Root(s)','Op ID / Error'].forEach(x=>ah.append(el('th',x)));
+    at.replaceChildren(ah);
+    d.audit.forEach(a=>{
+      const r=el('tr');
+      r.append(el('td',a.action),el('td',a.status),el('td',String(a.skeleton_id),'id'),el('td',a.old_root_id,'id'),
+               el('td',a.new_root_ids,'id'),el('td',a.error||String(a.operation_id||''),'msg'));
+      at.append(r);
+    });
+  }else{$('cm-audit-wrap').classList.add('hide')}
+}
+
+async function drawCatmaid(){
+  const d=await api('/api/catmaid/state');cmCache=d;
+  const sel=$('cm-proj');
+  const allNames=Array.from(new Set([...Object.keys(d.sample_datastacks||{}),...Object.keys(d.projects||{})]));
+  const opts=[...allNames,'+ Custom Project'];
+  if(sel.options.length!==opts.length||[...sel.options].some((o,i)=>o.value!==opts[i])){
+    const prev=sel.value;sel.replaceChildren();
+    opts.forEach(n=>sel.append(new Option(n,n)));
+    sel.value=allNames.includes(prev)?prev:(d.active_project&&allNames.includes(d.active_project)?d.active_project:opts[0]);
+    fillProjectForm(sel.value,d);
+  }
+  cmConfiguredSet=new Set(Object.keys(d.projects||{}));
+  $('cm-status').textContent=d.progress||d.message||'';
+  $('cm-plan-btn').disabled=(d.status==='loading'||d.status==='executing');
+  $('cm-exec-btn').disabled=(d.status==='loading'||d.status==='executing');
+  renderCatmaidTables(d);
+}
+
+$('cm-proj').onchange=()=>{if(cmCache){$('cm-setup-box').classList.add('hide');fillProjectForm($('cm-proj').value,cmCache)}};
+$('cm-toggle-setup').onclick=()=>$('cm-setup-box').classList.toggle('hide');
+
+$('cm-probe').onclick=cmSafe(async()=>{
+  $('cm-status').textContent='Connecting to CAVE (using saved local secret) and CATMAID to query resolutions...';
+  const res=await api('/api/catmaid/probe',{
+    cave_datastack:$('cm-ds').value,cave_server_address:$('cm-srv').value,
+    catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value
+  });
+  $('cm-cave-res').value=(res.cave_resolution_nm||[]).join(',');
+  const st=$('cm-stack');st.replaceChildren();
+  if(res.catmaid_stacks&&res.catmaid_stacks.length){
+    res.catmaid_stacks.forEach(s=>st.append(new Option(`${s.title} (${s.resolution_nm.join('x')} nm)`,s.resolution_nm.join(','))));
+    $('cm-res').value=res.catmaid_stacks[0].resolution_nm.join(',');
+  }else{st.append(new Option('No stacks returned - type resolution manually',''))}
+  $('cm-status').textContent='Resolutions queried from servers! Verify values below and click Save Project Profile.';
+});
+$('cm-stack').onchange=()=>{if($('cm-stack').value)$('cm-res').value=$('cm-stack').value};
+
+$('cm-save-proj').onclick=cmSafe(async()=>{
+  await api('/api/catmaid/save_project',{
+    project_name:$('cm-name').value,cave_datastack:$('cm-ds').value,cave_server_address:$('cm-srv').value,
+    cave_resolution_nm:$('cm-cave-res').value.split(',').map(Number),
+    catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value,
+    catmaid_resolution_nm:$('cm-res').value.split(',').map(Number),catmaid_coord_unit:$('cm-unit').value
+  });
+  $('cm-setup-box').classList.add('hide');
+  $('cm-status').textContent='Project profile saved locally to .cave_catmaid_config.json.';
+  $('cm-proj').replaceChildren();
+  await drawCatmaid();
+});
+
+$('cm-plan-btn').onclick=cmSafe(async()=>{
+  const proj=$('cm-proj').value;
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
+  await api('/api/catmaid/plan',{
+    project_name:proj,mode:$('cm-mode').value,query:$('cm-query').value,
+    min_nodes:+$('cm-min-nodes').value||3,force_refresh:$('cm-refresh').checked
+  });
+  await drawCatmaid();
+});
+
+$('cm-exec-btn').onclick=cmSafe(async()=>{
+  const nS=cmSplits.filter(x=>x.approve).length,nM=cmMerges.filter(x=>x.approve).length;
+  if(!confirm(`Execute ${nS} split(s) and ${nM} merge(s) in CAVE? Real chunkedgraph edits will be made.`))return;
+  await api('/api/catmaid/execute',{splits:cmSplits,merges:cmMerges});
+  await drawCatmaid();
+});
+
+drawCatmaid().catch(()=>{});setInterval(()=>drawCatmaid().catch(()=>{}),3000);
 </script></main></body></html>"""
 
 
