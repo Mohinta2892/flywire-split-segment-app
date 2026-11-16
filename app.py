@@ -214,6 +214,7 @@ def _cm_public_state():
             "cave_resolution_nm": cfg.get("cave_resolution_nm", []),
             "catmaid_url": cfg.get("catmaid_url", ""),
             "catmaid_project_id": cfg.get("catmaid_project_id", 1),
+            "catmaid_http_user": cfg.get("catmaid_http_user", ""),
             "catmaid_resolution_nm": cfg.get("catmaid_resolution_nm", []),
             "catmaid_coord_unit": cfg.get("catmaid_coord_unit", "nm"),
         }
@@ -245,37 +246,56 @@ def _cm_init_cave_client(cfg):
 
 
 def cm_probe_resolutions(d):
-    """First-time project probe: connect to CAVE (via saved local secret) & CATMAID and query stack resolutions."""
+    """Verify CATMAID & CAVE connections, query CAVE resolution, and check CATMAID stack info."""
     try:
         from caveclient import CAVEclient
-        import pymaid
-        from catmaid_cave_sync.config import query_cave_resolution, query_catmaid_stacks
+        from catmaid_cave_sync.config import (
+            load_all_configs,
+            normalize_catmaid_url,
+            query_cave_resolution,
+            probe_catmaid_connection,
+        )
+
+        name = (d.get("project_name") or "").strip()
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        existing = store.get("projects", {}).get(name, {})
 
         ds = (d.get("cave_datastack") or "").strip()
         cave_srv = (d.get("cave_server_address") or SERVER).strip()
-        cm_url = (d.get("catmaid_url") or "").strip()
+        cm_url = normalize_catmaid_url(d.get("catmaid_url") or "")
         cm_pid = int(d.get("catmaid_project_id") or 1)
-        cm_tok = (d.get("catmaid_token") or "").strip()
+        cm_tok = (d.get("catmaid_token") or "").strip() or existing.get("catmaid_token", "")
+        http_user = (d.get("catmaid_http_user") or "").strip() or existing.get("catmaid_http_user", "")
+        http_pass = (d.get("catmaid_http_password") or "").strip() or existing.get("catmaid_http_password", "")
+
         if not (ds and cm_url and cm_tok):
             return 400, {"error": "Select a sample/datastack and enter your CATMAID URL and CATMAID API token first."}
 
+        # 1. Verify CATMAID authentication first
+        stacks = probe_catmaid_connection(
+            server_url=cm_url,
+            project_id=cm_pid,
+            api_token=cm_tok,
+            http_user=http_user,
+            http_password=http_pass,
+        )
+
+        # 2. Verify CAVE connection & query CAVE segmentation base resolution
         kwargs = {"datastack_name": ds}
         if cave_srv:
             kwargs["server_address"] = cave_srv
         cave_client = CAVEclient(**kwargs)
-        rm = pymaid.CatmaidInstance(server=cm_url, api_token=cm_tok, project_id=cm_pid)
-
         cave_res = query_cave_resolution(cave_client)
-        stacks = query_catmaid_stacks(rm)
+
         return 200, {"cave_resolution_nm": cave_res, "catmaid_stacks": stacks}
     except Exception as exc:
         return 400, {"error": brief(exc)}
 
 
 def cm_save_project(d):
-    """Save a project profile (CATMAID token + queried resolutions) locally to .cave_catmaid_config.json."""
+    """Save a project profile (CATMAID credentials + resolutions) locally to .cave_catmaid_config.json."""
     try:
-        from catmaid_cave_sync.config import load_all_configs, save_project_config
+        from catmaid_cave_sync.config import load_all_configs, normalize_catmaid_url, save_project_config
 
         name = (d.get("project_name") or "").strip()
         if not name:
@@ -293,6 +313,9 @@ def cm_save_project(d):
         if not cm_tok:
             return 400, {"error": "CATMAID API token is required."}
 
+        http_user = (d.get("catmaid_http_user") or "").strip() or existing.get("catmaid_http_user", "")
+        http_pass = (d.get("catmaid_http_password") or "").strip() or existing.get("catmaid_http_password", "")
+
         ds = (d.get("cave_datastack") or "").strip() or SAMPLES.get(name, "")
         if not ds:
             return 400, {"error": "CAVE datastack name is required."}
@@ -301,9 +324,11 @@ def cm_save_project(d):
             "cave_datastack": ds,
             "cave_server_address": (d.get("cave_server_address") or SERVER).strip(),
             "cave_resolution_nm": cave_res,
-            "catmaid_url": (d.get("catmaid_url") or "").strip(),
+            "catmaid_url": normalize_catmaid_url(d.get("catmaid_url") or ""),
             "catmaid_project_id": int(d.get("catmaid_project_id") or 1),
             "catmaid_token": cm_tok,
+            "catmaid_http_user": http_user,
+            "catmaid_http_password": http_pass,
             "catmaid_resolution_nm": cm_res,
             "catmaid_coord_unit": d.get("catmaid_coord_unit") or "nm",
         }
@@ -315,20 +340,14 @@ def cm_save_project(d):
 
 def _run_cm_plan_worker(project_name, mode, query_val, min_nodes, force_refresh):
     try:
-        import pymaid
-        from catmaid_cave_sync.config import load_all_configs
+        from catmaid_cave_sync.config import load_all_configs, init_clients_from_project
         from catmaid_cave_sync.catmaid_loader import fetch_and_cache_skeletons, extract_non_end_nodes
         from catmaid_cave_sync.spatial_mapper import map_nodes_to_cave
         from catmaid_cave_sync.planner import build_proofreading_plan
 
         store = load_all_configs(CATMAID_CONFIG_PATH)
         cfg = store["projects"][project_name]
-        cave_client = _cm_init_cave_client(cfg)
-        pymaid.CatmaidInstance(
-            server=cfg["catmaid_url"],
-            api_token=cfg["catmaid_token"],
-            project_id=int(cfg["catmaid_project_id"]),
-        )
+        cave_client, _ = init_clients_from_project(cfg)
 
         skids_or_ann = (
             query_val.strip()
@@ -581,6 +600,7 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
 .metric{background:#fff;border:1px solid #e1e4e9;border-radius:8px;padding:12px 16px}.metric .v{font-size:20px;font-weight:600;margin-top:2px}
 .box{border:1px solid #d5dae2;border-radius:8px;padding:14px 16px;margin-top:14px;background:#fafbfc}.hide{display:none}
 .ngl{display:inline-block;margin-left:8px;color:#2b59c3;font-weight:500;text-decoration:none}.ngl:hover{text-decoration:underline}
+.ok{color:#17663a;font-weight:600}
 </style></head><body><main>
 <div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split or merge is a real chunkedgraph edit.</p>
 
@@ -613,15 +633,18 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
         <label>CAVE Server URL <input id="cm-srv" style="width:320px" placeholder="From config.json"></label>
       </div>
       <div class="fields" style="margin-top:12px">
-        <label>CATMAID Server URL <input id="cm-url" style="width:260px" placeholder="https://catmaid.example.org"></label>
-        <label>CATMAID Project ID <input id="cm-pid" type="number" min="1" value="1" style="width:110px"></label>
-        <label>CATMAID API Token <input id="cm-tok" type="password" placeholder="Leave blank to keep saved"></label>
-        <button type="button" id="cm-probe">1. Connect &amp; Query Resolutions</button>
+        <label>CATMAID Server URL <input id="cm-url" style="width:320px" placeholder="https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem"></label>
+        <label>CATMAID Project ID <input id="cm-pid" type="number" min="1" value="15" style="width:105px"></label>
+        <label>CATMAID API Token <input id="cm-tok" type="password" placeholder="CATMAID API token"></label>
+        <label>HTTP User (if required) <input id="cm-http-user" style="width:150px" placeholder="neurophyla user"></label>
+        <label>HTTP Password <input id="cm-http-pass" type="password" style="width:150px" placeholder="HTTP password"></label>
+        <button type="button" id="cm-probe">1. Verify Connection &amp; Query</button>
       </div>
+      <p id="cm-probe-msg" class="hint"></p>
       <div id="cm-res-box" class="fields" style="margin-top:12px">
-        <label>CATMAID Stack <select id="cm-stack"><option value="">Query server or enter below</option></select></label>
-        <label>CATMAID Resolution (x,y,z nm) <input id="cm-res" placeholder="Queried from server"></label>
-        <label>CAVE Resolution (x,y,z nm) <input id="cm-cave-res" placeholder="Queried from server"></label>
+        <label>CATMAID Stack <select id="cm-stack"><option value="">Verify connection or enter below</option></select></label>
+        <label>CATMAID Resolution (x,y,z nm) <input id="cm-res" placeholder="e.g. 8,8,16"></label>
+        <label>CAVE Resolution (x,y,z nm) <input id="cm-cave-res" placeholder="Queried from CAVE"></label>
         <label>CATMAID Coord Unit <select id="cm-unit"><option value="nm">nm</option><option value="voxels">voxels</option></select></label>
         <button type="button" id="cm-save-proj" class="primary">2. Save Project Profile</button>
       </div>
@@ -714,18 +737,21 @@ const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('c
 function fillProjectForm(name,d){
   const projects=d.projects||{},samples=d.sample_datastacks||{},defaultSrv=d.default_server||'';
   const cfg=projects[name];
+  $('cm-probe-msg').textContent='';$('cm-probe-msg').classList.remove('ok');
   if(!cfg){
     $('cm-name').value=(name&&name!=='+ Custom Project')?name:'';
     $('cm-ds').value=samples[name]||'';
     $('cm-srv').value=defaultSrv;
-    $('cm-url').value='';$('cm-pid').value='1';$('cm-tok').value='';
+    $('cm-url').value='';$('cm-pid').value='15';$('cm-tok').value='';
+    $('cm-http-user').value='';$('cm-http-pass').value='';
     $('cm-res').value='';$('cm-cave-res').value='';$('cm-unit').value='nm';
-    $('cm-proj-info').textContent=`First-time setup for "${name||'new project'}": enter your CATMAID credentials below and click Connect & Query Resolutions.`;
+    $('cm-proj-info').textContent=`First-time setup for "${name||'new project'}": enter your CATMAID credentials below and click Verify Connection & Query.`;
     $('cm-setup-box').classList.remove('hide');
     return;
   }
   $('cm-name').value=name;$('cm-ds').value=cfg.cave_datastack||samples[name]||'';$('cm-srv').value=cfg.cave_server_address||defaultSrv;
-  $('cm-url').value=cfg.catmaid_url||'';$('cm-pid').value=cfg.catmaid_project_id||1;$('cm-tok').value='';
+  $('cm-url').value=cfg.catmaid_url||'';$('cm-pid').value=cfg.catmaid_project_id||15;$('cm-tok').value='';
+  $('cm-http-user').value=cfg.catmaid_http_user||'';$('cm-http-pass').value='';
   $('cm-res').value=(cfg.catmaid_resolution_nm||[]).join(',');$('cm-cave-res').value=(cfg.cave_resolution_nm||[]).join(',');
   $('cm-unit').value=cfg.catmaid_coord_unit||'nm';
   $('cm-proj-info').textContent=`Loaded saved profile: ${name} | Datastack: ${$('cm-ds').value} | CATMAID res: [${$('cm-res').value}] nm | CAVE res: [${$('cm-cave-res').value}] nm`;
@@ -816,18 +842,30 @@ $('cm-proj').onchange=()=>{if(cmCache){$('cm-setup-box').classList.add('hide');f
 $('cm-toggle-setup').onclick=()=>$('cm-setup-box').classList.toggle('hide');
 
 $('cm-probe').onclick=cmSafe(async()=>{
-  $('cm-status').textContent='Connecting to CAVE (using saved local secret) and CATMAID to query resolutions...';
+  const pm=$('cm-probe-msg');pm.classList.remove('ok');
+  pm.textContent='Verifying CATMAID and CAVE connections...';
   const res=await api('/api/catmaid/probe',{
+    project_name:$('cm-name').value,
     cave_datastack:$('cm-ds').value,cave_server_address:$('cm-srv').value,
-    catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value
+    catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value,
+    catmaid_http_user:$('cm-http-user').value,catmaid_http_password:$('cm-http-pass').value
   });
   $('cm-cave-res').value=(res.cave_resolution_nm||[]).join(',');
   const st=$('cm-stack');st.replaceChildren();
-  if(res.catmaid_stacks&&res.catmaid_stacks.length){
-    res.catmaid_stacks.forEach(s=>st.append(new Option(`${s.title} (${s.resolution_nm.join('x')} nm)`,s.resolution_nm.join(','))));
-    $('cm-res').value=res.catmaid_stacks[0].resolution_nm.join(',');
-  }else{st.append(new Option('No stacks returned - type resolution manually',''))}
-  $('cm-status').textContent='Resolutions queried from servers! Verify values below and click Save Project Profile.';
+  const stacks=res.catmaid_stacks||[];
+  if(stacks.length){
+    stacks.forEach(s=>{
+      const rTxt=s.resolution_nm?`${s.resolution_nm.join('x')} nm`:'enter resolution manually below';
+      st.append(new Option(`${s.title} [ID ${s.stack_id}] (${rTxt})`,s.resolution_nm?s.resolution_nm.join(','):''));
+    });
+    if(stacks[0].resolution_nm){$('cm-res').value=stacks[0].resolution_nm.join(',')}
+    const names=stacks.map(s=>`${s.title} (ID ${s.stack_id})`).join(', ');
+    pm.textContent=`Connected to CATMAID & CAVE! Verified stack(s): ${names}. Confirm or enter CATMAID resolution (x,y,z nm) below and click Save Project Profile.`;
+  }else{
+    st.append(new Option('Connected - enter resolution manually below',''));
+    pm.textContent='Connected to CATMAID & CAVE! Enter CATMAID resolution (x,y,z nm) below and click Save Project Profile.';
+  }
+  pm.classList.add('ok');
 });
 $('cm-stack').onchange=()=>{if($('cm-stack').value)$('cm-res').value=$('cm-stack').value};
 
@@ -836,6 +874,7 @@ $('cm-save-proj').onclick=cmSafe(async()=>{
     project_name:$('cm-name').value,cave_datastack:$('cm-ds').value,cave_server_address:$('cm-srv').value,
     cave_resolution_nm:$('cm-cave-res').value.split(',').map(Number),
     catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value,
+    catmaid_http_user:$('cm-http-user').value,catmaid_http_password:$('cm-http-pass').value,
     catmaid_resolution_nm:$('cm-res').value.split(',').map(Number),catmaid_coord_unit:$('cm-unit').value
   });
   $('cm-setup-box').classList.add('hide');
