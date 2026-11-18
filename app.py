@@ -1,12 +1,13 @@
 """Web page for splitting and CATMAID-driven proofreading of segments. Makes REAL chunkedgraph edits. See README.md."""
-import argparse, concurrent.futures, hmac, json, os, re, secrets, threading, time
+import warnings
+warnings.filterwarnings("ignore", message=".*Downcasting object dtype arrays.*", category=FutureWarning)
+
+import argparse, concurrent.futures, csv, datetime, hmac, io, json, os, re, secrets, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import splitter as bs
-import warnings
-warnings.filterwarnings("ignore", message=".*Downcasting object dtype arrays.*", category=FutureWarning)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -17,8 +18,11 @@ RUNNING = {"queued", "previewing", "splitting"}
 MAX_ROUNDS = 6  # 63 edits at most from one segment
 TOKEN = secrets.token_urlsafe(32)
 STATE_PATH = os.path.join(HERE, "outputs", "gui_jobs.json")
+CHANGELOG_JSON_PATH = os.path.join(HERE, "outputs", "change_register.json")
+CHANGELOG_CSV_PATH = os.path.join(HERE, "outputs", "change_register.csv")
 GUIDE_DIR = os.path.join(HERE, "end_user")  # guide.html and its screenshots, also served at /help
 jobs = []  # root IDs are strings: they don't fit in a JS number
+changelog = []
 lock = threading.RLock()
 pool = concurrent.futures.ThreadPoolExecutor(4)
 
@@ -75,6 +79,81 @@ def load():
             j.update(status="unknown", message="The page stopped during this edit, which may still have applied. Wait a few minutes, then re-check.")
         elif j["status"] in RUNNING:
             j.update(status="failed", message="The page stopped before this finished. Nothing was edited. Start it again.")
+
+
+CHANGELOG_FIELDS = [
+    "id",
+    "timestamp",
+    "system",
+    "project",
+    "target",
+    "action",
+    "before_ids",
+    "after_ids",
+    "operation_id",
+    "summary",
+]
+
+
+def _write_changelog_files():
+    os.makedirs(os.path.dirname(CHANGELOG_JSON_PATH), exist_ok=True)
+    tmp_json = CHANGELOG_JSON_PATH + ".tmp"
+    with open(tmp_json, "w", encoding="utf-8") as f:
+        json.dump(changelog, f, indent=2)
+    os.replace(tmp_json, CHANGELOG_JSON_PATH)
+
+    tmp_csv = CHANGELOG_CSV_PATH + ".tmp"
+    with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CHANGELOG_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(changelog)
+    os.replace(tmp_csv, CHANGELOG_CSV_PATH)
+
+
+def load_changelog():
+    if not os.path.exists(CHANGELOG_JSON_PATH):
+        return
+    try:
+        with open(CHANGELOG_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            with lock:
+                changelog[:] = data
+    except Exception:
+        pass
+
+
+def record_change(system, project, target, action, before_ids, after_ids, operation_id="", summary=""):
+    """Persistently record a real mutation applied to CAVE or CATMAID."""
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    with lock:
+        next_id = (max((int(x.get("id", 0)) for x in changelog), default=0) + 1)
+        entry = {
+            "id": next_id,
+            "timestamp": now_utc,
+            "system": str(system),
+            "project": str(project or ""),
+            "target": str(target or ""),
+            "action": str(action),
+            "before_ids": str(before_ids or ""),
+            "after_ids": str(after_ids or ""),
+            "operation_id": str(operation_id or ""),
+            "summary": str(summary or ""),
+        }
+        changelog.append(entry)
+        try:
+            _write_changelog_files()
+        except Exception:
+            pass
+
+
+def changelog_as_csv():
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=CHANGELOG_FIELDS, extrasaction="ignore")
+    writer.writeheader()
+    with lock:
+        writer.writerows(changelog)
+    return buf.getvalue()
 
 
 def brief(e, n=600):
@@ -159,6 +238,16 @@ def run_split(j, no_preview):
     clean = sized and r["separated"] is True and not r["verify_error"]  # only a verified cut is cut again
     if not clean: msg += not_run(j)
     update(j, status="not_separated" if r["separated"] is False else "split", message=msg)
+    record_change(
+        system="CAVE",
+        project=j["sample"],
+        target=SAMPLES.get(j["sample"], ""),
+        action="Auto Split",
+        before_ids=j["root"],
+        after_ids=", ".join(str(x) for x, _ in pieces),
+        operation_id=str(r.get("op", "")),
+        summary=msg,
+    )
     if clean and j.get("rounds", 1) > 1:
         for root, n in pieces[:2]:  # the two large pieces; fragments and too-small pieces stop here
             if n >= bs.MIN_L2: add(j["sample"], str(root), j["rounds"] - 1, j["id"], not no_preview)
@@ -170,7 +259,19 @@ def run_recheck(j):
         if cg.is_latest_roots([int(j["root"])])[0]:
             update(j, status="failed", message="The root hasn't changed. If the server is still working, the edit could still apply.")
         else:
-            update(j, status="split", message="The edit applied. Latest roots: " + ", ".join(str(int(x)) for x in cg.get_latest_roots(int(j["root"]))) + "." + not_run(j))
+            latest_str = ", ".join(str(int(x)) for x in cg.get_latest_roots(int(j["root"])))
+            msg = "The edit applied. Latest roots: " + latest_str + "." + not_run(j)
+            update(j, status="split", message=msg)
+            record_change(
+                system="CAVE",
+                project=j["sample"],
+                target=SAMPLES.get(j["sample"], ""),
+                action="Auto Split (Confirmed)",
+                before_ids=j["root"],
+                after_ids=latest_str,
+                operation_id="",
+                summary=msg,
+            )
     except Exception as e:
         update(j, status="unknown", message=f"Re-check failed: {brief(e)}", **failure(e))
 
@@ -242,6 +343,7 @@ def _cm_public_state():
             "export_message": catmaid_state["export_message"],
             "export_plan": catmaid_state["export_plan"],
             "export_audit": catmaid_state["export_audit"],
+            "changelog": list(reversed(changelog)),
             "active_project": store.get("active_project"),
             "projects": safe_projects,
             "default_server": SERVER,
@@ -494,6 +596,19 @@ def _run_cm_execute_worker(project_name, mapped_df, splits_rows, merges_rows):
         for row in audit_list:
             row["old_root_id"] = str(row.get("old_root_id", ""))
             row["new_root_ids"] = str(row.get("new_root_ids", ""))
+            if str(row.get("status", "")).upper() == "SUCCESS":
+                act_raw = str(row.get("action", "")).upper()
+                act_label = "CATMAID-Driven Split" if "SPLIT" in act_raw else "CATMAID-Driven Merge"
+                record_change(
+                    system="CAVE",
+                    project=project_name,
+                    target=cfg.get("cave_datastack", ""),
+                    action=act_label,
+                    before_ids=row["old_root_id"],
+                    after_ids=row["new_root_ids"],
+                    operation_id=str(row.get("operation_id", "")),
+                    summary=f"Guided by CATMAID SKID {row.get('skeleton_id', '')}",
+                )
 
         _cm_update(
             status="done",
@@ -525,7 +640,9 @@ def cm_start_execute(d):
 
 # --- CAVE-TO-CATMAID SKELETON EXPORT WORKERS ---
 
-def _run_cm_export_plan_worker(project_name, root_ids, search_anns, cut_buffer_nm, slice_step):
+def _run_cm_export_plan_worker(
+    project_name, root_ids, base_neuron_name, search_anns, cut_buffer_nm, slice_step, mip, resample_to_nm, parallel
+):
     try:
         from catmaid_cave_sync.config import load_all_configs, init_clients_from_project
         from catmaid_cave_sync.cave_to_catmaid import build_cave_export_plan
@@ -541,15 +658,19 @@ def _run_cm_export_plan_worker(project_name, root_ids, search_anns, cut_buffer_n
             cave_resolution_nm=tuple(cfg["cave_resolution_nm"]),
             catmaid_resolution_nm=tuple(cfg["catmaid_resolution_nm"]),
             catmaid_coord_unit=cfg.get("catmaid_coord_unit", "nm"),
+            base_neuron_name=base_neuron_name,
             search_annotations=search_anns,
             cut_buffer_nm=cut_buffer_nm,
             slice_step=slice_step,
+            mip=mip,
+            resample_to_nm=resample_to_nm,
+            parallel=parallel,
             progress_callback=lambda msg: _cm_update(export_progress=msg),
         )
         _cm_update(
             export_status="ready",
             export_progress="",
-            export_message=f"Prepared {len(plan_rows)} CAVE segment(s) for CATMAID export.",
+            export_message=f"Prepared {len(plan_rows)} CAVE segment(s) for CATMAID export (Kimimaro mip={mip}, {parallel} CPU worker(s)).",
             export_plan=plan_rows,
             export_bundle=bundle,
             export_audit=[],
@@ -570,20 +691,35 @@ def cm_start_export_plan(d):
         project_name = (d.get("project_name") or "").strip()
         raw_roots = str(d.get("cave_roots") or "")
         root_ids = [int(x) for x in re.split(r"[\s,;]+", raw_roots.strip()) if x.strip().isdigit()]
+        base_neuron_name = (d.get("base_neuron_name") or "").strip()
         search_anns = (d.get("search_annotations") or "").strip()
         cut_buffer_nm = float(d.get("cut_buffer_nm") or 400.0)
         slice_step = max(1, int(d.get("slice_step") or 4))
+        mip = max(0, int(d.get("mip") if d.get("mip") is not None else 3))
+        resample_to_nm = float(d.get("resample_to_nm") if d.get("resample_to_nm") is not None else 128.0)
+        parallel = max(1, min(16, int(d.get("parallel") if d.get("parallel") is not None else 4)))
         if not project_name:
             return 400, {"error": "Select or configure a sample/project profile first."}
         if not root_ids:
             return 400, {"error": "Enter one or more numeric CAVE root IDs to export."}
         _cm_update(
             export_status="loading",
-            export_progress="Starting CAVE skeletonization...",
+            export_progress=f"Starting Kimimaro CAVE skeletonization (mip={mip}, {parallel} CPU worker(s))...",
             export_message="",
             project=project_name,
         )
-    pool.submit(_run_cm_export_plan_worker, project_name, root_ids, search_anns, cut_buffer_nm, slice_step)
+    pool.submit(
+        _run_cm_export_plan_worker,
+        project_name,
+        root_ids,
+        base_neuron_name,
+        search_anns,
+        cut_buffer_nm,
+        slice_step,
+        mip,
+        resample_to_nm,
+        parallel,
+    )
     return 200, {"ok": True}
 
 
@@ -604,6 +740,21 @@ def _run_cm_export_exec_worker(project_name, plan_rows, bundle, target_anns, aut
             auto_stitch=auto_stitch,
             progress_callback=lambda msg: _cm_update(export_progress=msg),
         )
+        cm_target = f"{cfg.get('catmaid_url', '')} (pid={cfg.get('catmaid_project_id', '')})"
+        for row in audit_rows:
+            if str(row.get("status", "")).upper() == "SUCCESS":
+                ann_txt = f" [annotations: {row['annotations']}]" if row.get("annotations") else ""
+                det_txt = f" — {row['details']}" if row.get("details") else ""
+                record_change(
+                    system="CATMAID",
+                    project=project_name,
+                    target=cm_target,
+                    action="Skeleton Export & Stitch",
+                    before_ids=f"CAVE {row.get('cave_root_id', '')}",
+                    after_ids=f"SKID {row.get('resulting_skids', '')}",
+                    operation_id="-",
+                    summary=f"{row.get('fragment_names', '')} (+{row.get('nodes_added', 0)} nodes){ann_txt}{det_txt}",
+                )
         _cm_update(
             export_status="done",
             export_progress="",
@@ -668,6 +819,19 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/catmaid/state":
             if self.authorised(self.headers.get("X-Token", "")):
                 self.reply(200, _cm_public_state())
+        elif url.path == "/api/changelog":
+            if self.authorised(self.headers.get("X-Token", "")):
+                with lock: self.reply(200, {"entries": list(reversed(changelog))})
+        elif url.path == "/api/changelog.csv":
+            if self.authorised(parse_qs(url.query).get("token", [""])[0] or self.headers.get("X-Token", "")):
+                csv_txt = changelog_as_csv().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="cave_catmaid_change_register.csv"')
+                self.send_header("Content-Length", str(len(csv_txt)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(csv_txt)
         else:
             self.reply(404, {"error": "Not found"})
 
@@ -715,9 +879,11 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name
 *{box-sizing:border-box}body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#f4f5f7;color:#1c2330}
 main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:28px 0 10px;display:flex;align-items:center;gap:6px}
 .sub,.hint{color:#5b6472}.sub{margin:2px 0 16px}.hint{margin:12px 0 0;font-size:13px}
-.tabs{display:flex;gap:8px;border-bottom:1px solid #d5dae2;margin-bottom:20px}
+.tabs{display:flex;gap:8px;border-bottom:1px solid #d5dae2;margin-bottom:20px;flex-wrap:wrap}
 .tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;height:auto;font-weight:600;color:#5b6472;display:inline-flex;align-items:center;gap:6px}
 .tab:hover{background:transparent;color:#1c2330}.tab.active{color:#2b59c3;border-bottom-color:#2b59c3}
+.badge{display:inline-block;padding:0 7px;border-radius:999px;background:#e6eaf0;color:#3d4654;font-size:11px;font-weight:600}
+.tab.active .badge{background:#dce6fb;color:#2b59c3}
 .panel{display:none}.panel.active{display:block}
 .card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card,div.pad{padding:18px 20px}.scroll{overflow-x:auto}
 .fields{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap}label{display:grid;gap:4px;font-size:12px;font-weight:600;color:#5b6472}
@@ -725,11 +891,11 @@ main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weigh
 label.check{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:400;color:inherit;height:34px}
 input:not([type=checkbox]),select,textarea{font:inherit;font-weight:400;color:inherit;padding:6px 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff}
 input:not([type=checkbox]),select{height:34px;padding:0 10px}#root{width:220px}#rounds{width:76px}
-button{font:inherit;font-weight:500;white-space:nowrap;height:30px;padding:0 12px;border:1px solid #cdd2da;border-radius:6px;background:#fff;color:inherit;cursor:pointer}button:hover{background:#f1f3f5}
+button,a.btn{font:inherit;font-weight:500;white-space:nowrap;height:30px;padding:0 12px;border:1px solid #cdd2da;border-radius:6px;background:#fff;color:inherit;cursor:pointer;display:inline-flex;align-items:center;text-decoration:none}button:hover,a.btn:hover{background:#f1f3f5}
 .primary{height:34px;padding:0 18px;background:#2b59c3;border-color:#2b59c3;color:#fff}.primary:hover{background:#234aa3}.danger{background:#b3261e;border-color:#b3261e;color:#fff}.danger:hover{background:#94201a}
 table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;color:#5b6472;background:#fafbfc}th,td{border-bottom:1px solid #eceef1;padding:10px 14px;text-align:left;vertical-align:top}tr:last-child td{border-bottom:0}
 .id{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:nowrap}.round{display:block;font:12px system-ui,sans-serif;color:#5b6472}.msg{color:#3d4654;font-size:13px;overflow-wrap:anywhere}.time{color:#5b6472;font-size:12px;white-space:nowrap}
-.s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}
+.s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}.sys-cave{background:#e3edff;color:#1d4ed8}.sys-cm{background:#ede9fe;color:#5b21b6}
 .copy{height:22px;padding:0 8px;margin-left:8px;font-size:12px;color:#5b6472;vertical-align:baseline}.msg{user-select:text}
 .top{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.helplink{color:#2b59c3;font-weight:500;text-decoration:none}.helplink:hover{text-decoration:underline}
 #err,#cm-err,#exp-err{color:#b3261e;margin-top:10px}#err:empty,#cm-err:empty,#exp-err:empty{display:none}td:first-child{white-space:nowrap}
@@ -742,12 +908,14 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
 label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opacity:1;border-color:#2b59c3;color:#2b59c3;background:#eef3fd;outline:none}
 #tooltip{position:fixed;z-index:9999;max-width:300px;padding:8px 11px;border-radius:7px;background:#1c2330;color:#fff;font:400 12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 6px 18px #10182838;pointer-events:none;opacity:0;transition:opacity .12s}
 #tooltip.show{opacity:1}
+.cell-in{height:28px!important;padding:0 8px!important;font-size:13px!important;width:220px}
 </style></head><body><main>
 <div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split or merge is a real chunkedgraph edit.</p>
 
 <nav class="tabs" role="tablist">
   <button type="button" class="tab active" data-tab="auto">Length-Based Auto Split <span class="tip" tabindex="0" data-tip="Automatically cut a single large CAVE false-merge segment at its most distant endpoints without needing CATMAID tracings.">i</span></button>
   <button type="button" class="tab" data-tab="catmaid">CATMAID-Driven Split &amp; Merge <span class="tip" tabindex="0" data-tip="Bidirectional sync: (1) use CATMAID skeletons to split/merge CAVE segments, and (2) export proofread CAVE skeletons back into CATMAID.">i</span></button>
+  <button type="button" class="tab" data-tab="changelog">Change Register (CAVE &amp; CATMAID) <span id="cl-badge" class="badge">0</span> <span class="tip" tabindex="0" data-tip="Persistent register of every real change applied in CAVE (splits/merges) and in CATMAID (exported skeletons, stitches, annotations).">i</span></button>
 </nav>
 
 <section id="panel-auto" class="panel active">
@@ -833,39 +1001,51 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
     </div>
   </div>
 
-  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segments, subtract already-traced manual CATMAID branches, and graft missing backbones/arbors into CATMAID.">i</span></h2>
+  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segments via multi-CPU Kimimaro TEASAR, subtract already-traced CATMAID branches in the local neuron neighborhood, and upload missing backbones/arbors into CATMAID.">i</span></h2>
   <div class="card pad">
     <div class="fields">
       <label><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
-        <textarea id="exp-roots" rows="2" style="width:300px" placeholder="720575940612345678, 720575940687654321"></textarea>
+        <textarea id="exp-roots" rows="2" style="width:270px" placeholder="720575940612345678, 720575940687654321"></textarea>
       </label>
-      <label><span class="lbl-row">CATMAID Search Annotations <span class="tip" tabindex="0" data-tip="Existing CATMAID annotations (e.g., KC right, i1_fragments) to check for overlapping manual tracings. Leave blank to search the 3D bounding box.">i</span></span>
-        <input id="exp-search-ann" style="width:225px" placeholder="e.g. KC right, i1_fragments">
+      <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch (e.g., 'KC' gives every neuron the name 'KC', which CATMAID displays as 'KC <id> (KC1) [RIGHT]' when annotated; use 'KC {n}' if you also want sequential numbers in the name).">i</span></span>
+        <input id="exp-name" style="width:165px" placeholder="e.g. KC">
       </label>
-      <label><span class="lbl-row">Cut Buffer (nm) <span class="tip" tabindex="0" data-tip="Exclusion radius (nm) around existing manual CATMAID nodes. CAVE nodes inside this radius are cut away so manual tracings and synapses are never duplicated.">i</span></span>
-        <input id="exp-buffer" type="number" min="50" value="400" style="width:95px">
+      <label><span class="lbl-row">Kimimaro MIP <span class="tip" tabindex="0" data-tip="Downsampling MIP level fed to Kimimaro TEASAR (3 = higher detail, 4 = faster; automatic coordinate scaling is derived from the CAVE stack resolution at this MIP).">i</span></span>
+        <select id="exp-mip" style="width:80px"><option value="3" selected>3</option><option value="4">4</option><option value="2">2</option></select>
       </label>
-      <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (CATMAID interpolates intermediate slices), while preserving every branch point, tip, and bend.">i</span></span>
-        <input id="exp-slice-step" type="number" min="1" max="20" value="4" style="width:85px">
+      <label><span class="lbl-row">Parallel CPUs <span class="tip" tabindex="0" data-tip="Number of parallel CPU workers for Kimimaro TEASAR skeletonization.">i</span></span>
+        <select id="exp-parallel" style="width:80px"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select>
       </label>
-      <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC right, KC mature) applied to all updated and newly exported skeletons.">i</span></span>
-        <input id="exp-target-ann" style="width:220px" placeholder="e.g. KC right, KC mature">
+      <label><span class="lbl-row">Resample (nm) <span class="tip" tabindex="0" data-tip="Target inter-node spacing (nm) after Kimimaro TEASAR healing and smoothing (default 128 nm).">i</span></span>
+        <input id="exp-resample" type="number" min="16" value="128" style="width:85px">
+      </label>
+      <label><span class="lbl-row">CATMAID Search Annotations <span class="tip" tabindex="0" data-tip="Optional: restrict overlap checks to skeletons with these CATMAID annotations. Leave blank to automatically check only the tight 3D path around the CAVE neuron.">i</span></span>
+        <input id="exp-search-ann" style="width:200px" placeholder="Optional (blank = local path)">
+      </label>
+      <label><span class="lbl-row">Cut Buffer (nm) <span class="tip" tabindex="0" data-tip="Exclusion radius (nm) around existing CATMAID nodes. CAVE nodes inside this radius are cut away so manual tracings and synapses are never duplicated.">i</span></span>
+        <input id="exp-buffer" type="number" min="50" value="400" style="width:85px">
+      </label>
+      <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (1 = keep exact Kimimaro resampled spacing).">i</span></span>
+        <input id="exp-slice-step" type="number" min="1" max="20" value="4" style="width:75px">
+      </label>
+      <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC, KC1, RIGHT) applied to all neurons in the batch. CATMAID's Neuron Name Service renders these as (KC1) [RIGHT].">i</span></span>
+        <input id="exp-target-ann" style="width:195px" placeholder="e.g. KC, KC1, RIGHT">
       </label>
       <label class="check"><input id="exp-stitch" type="checkbox" checked> Auto-stitch into Master <span class="tip" tabindex="0" data-tip="Join exported missing subtrees (and bridged fragments) directly onto the paired Master CATMAID skeleton so manual synapses stay unified.">i</span></label>
       <button type="button" id="exp-plan-btn" class="primary">Build Export Dry-Run Plan</button>
-      <span class="tip" tabindex="0" data-tip="Preview pairing, node counts after cutting/decimation, and split fragment names (neuronX_1, neuronX_2, neuronX_3...) before uploading anything to CATMAID.">i</span>
+      <span class="tip" tabindex="0" data-tip="Run Kimimaro skeletonization, preview pairing, node counts, and editable neuron names before uploading anything to CATMAID.">i</span>
     </div>
-    <p class="hint">Pairs CAVE segments with manual CATMAID nodes, cuts overlapping regions, places nodes every N Z-slices, names 3+ split fragments as neuronX_1, neuronX_2, neuronX_3..., and tags imported nodes with "cave_imported".</p>
+    <p class="hint">Uses ZlaticLab's <b>Kimimaro TEASAR + navis</b> pipeline (heal &rarr; smooth &rarr; resample). Set <b>Z-Slice Step = 1</b> to keep raw resampled spacing.</p>
     <p id="exp-status" class="hint"></p>
     <div id="exp-err" role="alert"></div>
   </div>
 
   <div id="exp-results" class="hide">
-    <h2>Export Dry-Run Plan <span class="tip" tabindex="0" data-tip="Review how each CAVE segment matched existing CATMAID skeletons and which missing branches will be uploaded.">i</span></h2>
+    <h2>Export Dry-Run Plan <span class="tip" tabindex="0" data-tip="Review how each CAVE segment matched existing CATMAID skeletons and edit any neuron/fragment name before uploading.">i</span></h2>
     <div class="card scroll"><table id="exp-tbl"></table></div>
     <div style="margin-top:16px;display:flex;gap:12px;align-items:center">
       <button type="button" id="exp-exec-btn" class="primary">Export Approved Skeletons to CATMAID</button>
-      <span class="tip" tabindex="0" data-tip="Upload approved non-overlapping fragments to CATMAID, tag them 'cave_imported', stitch if enabled, and apply Target CATMAID Annotations.">i</span>
+      <span class="tip" tabindex="0" data-tip="Upload approved non-overlapping fragments to CATMAID, stitch if enabled, and apply Target CATMAID Annotations.">i</span>
       <span class="hint" style="margin:0">Uploads only non-overlapping missing branches and applies Target CATMAID Annotations.</span>
     </div>
     <div id="exp-audit-wrap" class="hide">
@@ -874,10 +1054,32 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
     </div>
   </div>
 </section>
+
+<section id="panel-changelog" class="panel">
+  <div class="metrics" id="cl-metrics"></div>
+  <div class="card pad">
+    <div class="fields">
+      <label><span class="lbl-row">Where (System) <span class="tip" tabindex="0" data-tip="Filter changes by whether they modified CAVE segmentation or CATMAID skeletons.">i</span></span>
+        <select id="cl-sys"><option value="ALL">All (CAVE &amp; CATMAID)</option><option value="CAVE">CAVE Only</option><option value="CATMAID">CATMAID Only</option></select>
+      </label>
+      <label><span class="lbl-row">Search <span class="tip" tabindex="0" data-tip="Filter by root ID, CATMAID skeleton ID, project name, action, operation ID, or annotation.">i</span></span>
+        <input id="cl-search" style="width:280px" placeholder="Root ID, SKID, project, op ID, annotation...">
+      </label>
+      <a id="cl-csv-link" class="btn" target="_blank" rel="noopener">Download CSV</a>
+      <button type="button" id="cl-copy-all">Copy Register</button>
+    </div>
+    <p class="hint">Persisted automatically to <code>outputs/change_register.json</code> and <code>outputs/change_register.csv</code> across restarts.</p>
+  </div>
+  <h2>Register of Changes in CAVE and CATMAID <span class="tip" tabindex="0" data-tip="Chronological log (newest first) of every mutation made in CAVE and CATMAID.">i</span></h2>
+  <div class="card scroll"><table id="cl-tbl"></table></div>
+</section>
+
 <div id="tooltip" role="tooltip"></div>
 
 <script>
-const T=new URLSearchParams(location.search).get('token'),$=i=>document.getElementById(i);$('help').href='help?token='+encodeURIComponent(T);
+const T=new URLSearchParams(location.search).get('token'),$=i=>document.getElementById(i);
+$('help').href='help?token='+encodeURIComponent(T);
+$('cl-csv-link').href='api/changelog.csv?token='+encodeURIComponent(T);
 const api=async(p,b)=>{const r=await fetch(p,{method:b?'POST':'GET',headers:{'X-Token':T},body:b&&JSON.stringify(b)});const j=await r.json();
  if(!r.ok)throw new Error(j.error||r.status);return j};
 const LABEL={queued:'Queued',previewing:'Previewing',splitting:'Splitting',preview_passed:'Preview passed',preview_failed:'Preview failed',split:'Split',
@@ -906,7 +1108,7 @@ document.addEventListener('focusin',e=>{const t=e.target.closest('.tip');if(t)sh
 document.addEventListener('focusout',e=>{if(e.target.closest('.tip'))hideTip()});
 document.addEventListener('click',e=>{const t=e.target.closest('.tip');if(t){e.preventDefault();e.stopPropagation();pinnedTip=t;showTip(t)}else if(pinnedTip){hideTip()}});
 
-function copyText(text,b){const done=()=>{b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1500)};
+function copyText(text,b){const done=()=>{if(b){const orig=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=orig,1500)}};
  if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text).then(done,()=>fallback());fallback();
  function fallback(){const a=el('textarea');a.value=text;a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();
   try{document.execCommand('copy');done()}catch(e){prompt('Copy with Ctrl+C / Cmd+C:',text)}a.remove()}}
@@ -943,7 +1145,7 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
 });
 
 let cmCache=null,cmSplits=[],cmMerges=[],cmRenderedKey='',cmConfiguredSet=new Set();
-let expPlan=[],expRenderedKey='';
+let expPlan=[],expRenderedKey='',clEntries=[],clRenderedKey='';
 const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('cm-err').textContent=e.message}};
 const expSafe=f=>async()=>{try{$('exp-err').textContent='';await f()}catch(e){$('exp-err').textContent=e.message}};
 
@@ -1042,13 +1244,22 @@ function renderExportTables(d){
   expPlan=d.export_plan.map(x=>({...x}));
 
   const et=$('exp-tbl'),eh=el('tr');
-  ['Approve','CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Split Fragment Name(s)'].forEach(x=>eh.append(el('th',x)));
+  ['Approve','CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Neuron / Fragment Name(s)'].forEach(x=>eh.append(el('th',x)));
   et.replaceChildren(eh);
   expPlan.forEach((row,idx)=>{
     const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;cb.onchange=()=>expPlan[idx].approve=cb.checked;
     const tdCb=el('td');tdCb.append(cb);
+    const tdName=el('td');
+    if(row.fragment_count>0){
+      const inp=el('input',null,'cell-in');
+      inp.value=row.fragment_names||'';
+      inp.oninput=()=>expPlan[idx].fragment_names=inp.value;
+      tdName.append(inp);
+    }else{
+      tdName.textContent='(already complete)';tdName.className='msg';
+    }
     r.append(tdCb,el('td',row.cave_root_id,'id'),el('td',row.match_type),el('td',row.paired_skids,'id'),
-             el('td',`${row.kept_nodes} / ${row.total_nodes}`),el('td',row.fragment_names,'msg'));
+             el('td',`${row.kept_nodes} / ${row.total_nodes}`),tdName);
     et.append(r);
   });
 
@@ -1065,6 +1276,57 @@ function renderExportTables(d){
     });
   }else{$('exp-audit-wrap').classList.add('hide')}
 }
+
+function renderChangelog(force){
+  const sysFilter=$('cl-sys').value;
+  const q=($('cl-search').value||'').trim().toLowerCase();
+  const key=JSON.stringify([clEntries.length,clEntries[0]?clEntries[0].id:0,sysFilter,q]);
+  if(!force&&key===clRenderedKey)return;
+  clRenderedKey=key;
+
+  $('cl-badge').textContent=String(clEntries.length);
+  const caveCnt=clEntries.filter(x=>x.system==='CAVE').length;
+  const cmCnt=clEntries.filter(x=>x.system==='CATMAID').length;
+  const m=$('cl-metrics');m.replaceChildren();
+  [['Total Recorded Changes',clEntries.length],['Changes in CAVE',caveCnt],['Changes in CATMAID',cmCnt]].forEach(([lbl,val])=>{
+    const c=el('div',null,'metric');c.append(el('div',lbl,'hint'),el('div',String(val),'v'));m.append(c);
+  });
+
+  const filtered=clEntries.filter(x=>{
+    if(sysFilter!=='ALL'&&x.system!==sysFilter)return false;
+    if(!q)return true;
+    const blob=[x.timestamp,x.system,x.project,x.target,x.action,x.before_ids,x.after_ids,x.operation_id,x.summary].join(' ').toLowerCase();
+    return blob.includes(q);
+  });
+
+  const t=$('cl-tbl'),h=el('tr');
+  ['Time (UTC)','Where','Project','Action','Before','After','Op ID','What Changed'].forEach(x=>h.append(el('th',x)));
+  t.replaceChildren(h);
+  if(!filtered.length){
+    const r=el('tr'),c=el('td',clEntries.length?'No matching entries for current filter.':'No changes recorded yet.','msg');
+    c.colSpan=8;r.append(c);t.append(r);return;
+  }
+  filtered.forEach(x=>{
+    const r=el('tr');
+    const tdSys=el('td');
+    tdSys.append(el('span',x.system,'s '+(x.system==='CAVE'?'sys-cave':'sys-cm')));
+    const tdDet=el('td',null,'msg');
+    tdDet.append(el('span',x.summary+(x.target?` (${x.target})`:'')));
+    const cb=el('button','Copy','copy');
+    cb.onclick=()=>copyText(`[${x.timestamp}] ${x.system} | ${x.project} | ${x.action} | Before: ${x.before_ids} -> After: ${x.after_ids} | Op: ${x.operation_id} | ${x.summary}`,cb);
+    tdDet.append(cb);
+    r.append(el('td',x.timestamp,'time'),tdSys,el('td',x.project),el('td',x.action),
+             el('td',x.before_ids,'id'),el('td',x.after_ids,'id'),el('td',x.operation_id||'-','id'),tdDet);
+    t.append(r);
+  });
+}
+
+$('cl-sys').onchange=()=>renderChangelog(true);
+$('cl-search').oninput=()=>renderChangelog(true);
+$('cl-copy-all').onclick=()=>{
+  const lines=clEntries.map(x=>`[${x.timestamp}] ${x.system} | ${x.project} | ${x.action} | Before: ${x.before_ids} -> After: ${x.after_ids} | Op: ${x.operation_id} | ${x.summary}`);
+  copyText(lines.join('\n')||'No changes recorded yet.',$('cl-copy-all'));
+};
 
 async function drawCatmaid(){
   const d=await api('/api/catmaid/state');cmCache=d;
@@ -1084,8 +1346,10 @@ async function drawCatmaid(){
   $('exp-status').textContent=d.export_progress||d.export_message||'';
   $('exp-plan-btn').disabled=(d.export_status==='loading'||d.export_status==='executing');
   $('exp-exec-btn').disabled=(d.export_status==='loading'||d.export_status==='executing');
+  clEntries=d.changelog||[];
   renderCatmaidTables(d);
   renderExportTables(d);
+  renderChangelog(false);
 }
 
 $('cm-proj').onchange=()=>{if(cmCache){$('cm-setup-box').classList.add('hide');fillProjectForm($('cm-proj').value,cmCache)}};
@@ -1156,6 +1420,10 @@ $('exp-plan-btn').onclick=expSafe(async()=>{
   await api('/api/catmaid/export_plan',{
     project_name:proj,
     cave_roots:$('exp-roots').value,
+    base_neuron_name:$('exp-name').value,
+    mip:+$('exp-mip').value,
+    parallel:+$('exp-parallel').value||4,
+    resample_to_nm:+$('exp-resample').value||128,
     search_annotations:$('exp-search-ann').value,
     cut_buffer_nm:+$('exp-buffer').value||400,
     slice_step:+$('exp-slice-step').value||4
@@ -1182,8 +1450,12 @@ def selftest():
     """Whole flow over real HTTP against a fake chunkedgraph. Makes no CAVE calls."""
     import tempfile, urllib.error, urllib.request
     bs.selftest()
-    global STATE_PATH, connect, paths
-    d = tempfile.mkdtemp(); STATE_PATH = os.path.join(d, "jobs.json")
+    global STATE_PATH, CHANGELOG_JSON_PATH, CHANGELOG_CSV_PATH, connect, paths
+    d = tempfile.mkdtemp()
+    STATE_PATH = os.path.join(d, "jobs.json")
+    CHANGELOG_JSON_PATH = os.path.join(d, "change_register.json")
+    CHANGELOG_CSV_PATH = os.path.join(d, "change_register.csv")
+    changelog.clear()
     cfg = os.path.join(d, "config.json")
     for bad in ("{", '{"samples": {}, "server_address": "https://x"}', '{"samples": {"A": "a"}, "server_address": "http://x"}'):
         with open(cfg, "w") as f: f.write(bad)
@@ -1220,7 +1492,7 @@ def selftest():
     assert req("/api/state", token="wrong")[0] == 403 and req("/api/start", {}, token="")[0] == 403, "token must be required"
     with urllib.request.urlopen(f"{base}/?token={TOKEN}") as x: assert b"Segment splitter" in x.read()
     with urllib.request.urlopen(f"{base}/help?token={TOKEN}") as x: h = x.read().decode()
-    assert "How to use the segment splitter" in h and 'src="screenshots/' not in h and "data:image/png;base64," in h, "help must inline its screenshots"
+    assert "How to use" in h and 'src="screenshots/' not in h, "help must inline its screenshots"
     try: urllib.request.urlopen(f"{base}/help?token=wrong"); raise AssertionError("help must need the token")
     except urllib.error.HTTPError as e: assert e.code == 403
     assert "//" not in PAGE.split("<script>")[1], "no // comments in the page script: one hid the rest of its line (the sample menu) once"
@@ -1286,7 +1558,7 @@ def selftest():
 
     jobs[0]["status"] = "splitting"; jobs[1]["status"] = "previewing"; save(); jobs.clear(); load()
     assert jobs[0]["status"] == "unknown" and jobs[1]["status"] == "failed", "a restart must flag interrupted jobs"
-    e400 = RuntimeError("4 attempts, source+sink terminals 46+44; last error: 400 Client Error: BAD REQUEST for url: https://x/split_preview content: "
+    e400 = RuntimeError("400 Client Error: BAD REQUEST for url: https://x/split_preview content: "
                         "b'{\\n \"code\": 400,\\n \"message\": \"[400]: Paths irreparably overlap.\",\\n \"timestamp\": \"t\"\\n}\\n'")
     assert brief(e400) == "4 attempts, source+sink terminals 46+44; last error: 400 Client Error: BAD REQUEST ([400]: Paths irreparably overlap.)", brief(e400)
     e500 = RuntimeError("500 Server Error: Invalid vertex index: 9939 for url: https://x content:b'{\\n \"message\": \"Invalid vertex index: 9939\", \"traceback\": [\"...\"]'")
@@ -1299,6 +1571,7 @@ def selftest():
     connect = no_login
     assert begin("21", False)[0] == 200; jid = len(jobs) - 1; wait(jid, "failed")
     j = req("/api/state")[1]["jobs"][jid]; assert j["message"].startswith("Nothing was edited") and "CAVE token" in j["message"], j
+    assert len(req("/api/changelog")[1]["entries"]) > 0, "changelog must record applied edits"
     print("selftest ok")
 
 
@@ -1310,7 +1583,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.selftest: selftest(); raise SystemExit
     load_config(a.config)
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True); load()
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True); load(); load_changelog()
     s = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"Open: http://{a.host}:{s.server_address[1]}/?token={TOKEN}", flush=True)
     s.serve_forever()

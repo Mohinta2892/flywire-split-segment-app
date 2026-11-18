@@ -8,8 +8,9 @@ numpy>=1.21
 scipy>=1.8          # sparse Laplacian and eigsh for the spectral bisection; cdist for closest-node merge pairing
 networkx>=2.8       # L2 graph; to_scipy_sparse_array needs 2.7+
 
-# --- Added dependencies (CATMAID-driven split & merge) ---
+# --- Added dependencies (CATMAID-driven split & merge + CAVE -> CATMAID export) ---
 pandas>=1.5         # Node tables, batch dry-run plans, and CSV audit logs
-cloud-volume        # Fast batched supervoxel lookups via CloudVolume.scattered_points
-python-catmaid      # PyPI package for `import pymaid` (CATMAID API & stack resolution queries)
-navis               # Local SWC skeleton caching and neuron node tree handling
+cloud-volume        # Fast batched supervoxel lookups via CloudVolume.scattered_points & MIP segmentation downloads
+python-catmaid      # PyPI package for `import pymaid` (CATMAID API, stack queries, and skeleton uploads)
+navis               # Local SWC skeleton caching, neuron node tree handling, healing, smoothing, and resampling
+kimimaro            # TEASAR volumetric skeletonization of CAVE segmentation volumes

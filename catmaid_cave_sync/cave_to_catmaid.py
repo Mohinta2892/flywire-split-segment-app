@@ -1,11 +1,17 @@
-from collections import deque
-import inspect
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from urllib.parse import urlparse
+
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
+from scipy.sparse.csgraph import connected_components
 import navis
 import pymaid
 from caveclient import CAVEclient
@@ -13,133 +19,373 @@ from caveclient import CAVEclient
 from .spatial_mapper import map_nodes_to_cave
 
 
-def _fetch_l2_coords_nm(cave_client: CAVEclient, l2_ids: np.ndarray) -> dict[int, np.ndarray]:
-    """Query representative 3D coordinates (nm) for L2 IDs when l2cache is available."""
-    coords = {}
-    id_list = [int(x) for x in l2_ids]
-    batch_size = 5000
-    for i in range(0, len(id_list), batch_size):
-        chunk = id_list[i : i + batch_size]
-        info = cave_client.l2cache.get_l2data(chunk, attributes=["rep_coord_nm"])
-        for k, v in info.items():
-            pt = v.get("rep_coord_nm") if isinstance(v, dict) else None
-            if pt is not None and len(pt) == 3:
-                coords[int(k)] = np.asarray(pt, dtype=np.float64)
-    return coords
+DEFAULT_KIMIMARO_CONFIG = {
+    "mip": 3,
+    "scale": 1.0,
+    "const": 10.0,
+    "pdrf_scale": 10000,
+    "pdrf_exponent": 2,
+    "pdrf_soma_acceptance_threshold": 30,
+    "pdrf_soma_detection_threshold": 20,
+    "pdrf_soma_invalidation_const": 30,
+    "pdrf_soma_invalidation_scale": 1,
+    "max_paths": None,
+    "dust_threshold": 0,
+    "parallel": 4,
+    "smooth_window": 2,
+    "resample_to": 128.0,
+}
+
+_KIMIMARO_WORKER_CODE = """
+import json, sys
+import numpy as np
+import kimimaro
+
+seg_path, cfg_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+seg = np.load(seg_path)
+with open(cfg_path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+skels = kimimaro.skeletonize(
+    seg,
+    teasar_params={
+        "scale": cfg["scale"],
+        "const": cfg["const"],
+        "pdrf_scale": cfg["pdrf_scale"],
+        "pdrf_exponent": cfg["pdrf_exponent"],
+        "soma_acceptance_threshold": cfg["pdrf_soma_acceptance_threshold"],
+        "soma_detection_threshold": cfg["pdrf_soma_detection_threshold"],
+        "soma_invalidation_const": cfg["pdrf_soma_invalidation_const"],
+        "soma_invalidation_scale": cfg["pdrf_soma_invalidation_scale"],
+        "max_paths": cfg["max_paths"],
+    },
+    dust_threshold=cfg["dust_threshold"],
+    fix_branching=True,
+    fix_borders=True,
+    fill_holes=False,
+    fix_avocados=False,
+    progress=False,
+    parallel=int(cfg["parallel"]),
+    parallel_chunk_size=1,
+)
+
+swc_map = {str(int(rid)): skel.to_swc() for rid, skel in skels.items()}
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(swc_map, f)
+"""
 
 
-def _fetch_cave_mesh(cave_client: CAVEclient, root_id: int):
-    """Fetch the 3D surface mesh (vertices in nm) for a CAVE root via CloudVolume."""
-    from cloudvolume import CloudVolume
-
-    seg_source = cave_client.info.segmentation_source()
-    cv_kwargs = {
-        "use_https": True,
-        "parallel": 1,
-        "progress": False,
-    }
-    token = getattr(getattr(cave_client, "auth", None), "token", None)
-    if token:
-        cv_kwargs["secrets"] = token
-
-    vol = CloudVolume(seg_source, **cv_kwargs)
-    try:
-        raw_mesh = vol.mesh.get(int(root_id), deduplicate_chunk_boundaries=False)
-    except TypeError:
-        raw_mesh = vol.mesh.get(int(root_id))
-
-    if isinstance(raw_mesh, dict):
-        if int(root_id) in raw_mesh:
-            return raw_mesh[int(root_id)]
-        if raw_mesh:
-            return next(iter(raw_mesh.values()))
-        raise ValueError(f"CloudVolume returned an empty mesh dictionary for CAVE root {root_id}.")
-    return raw_mesh
+def _extract_host(exc: Exception) -> str:
+    txt = str(exc)
+    idx = txt.find("http")
+    if idx != -1:
+        end = idx
+        while end < len(txt) and not txt[end].isspace() and txt[end] not in ("'", '"', ")"):
+            end += 1
+        host = urlparse(txt[idx:end]).netloc
+        if host:
+            return host
+    return ""
 
 
-def _points_to_mst_neuron(
-    pts_nm: np.ndarray,
-    root_id: int,
-    scale: np.ndarray,
-    connect_radius_nm: float = 450.0,
-    min_twig_nm: float = 250.0,
-) -> navis.TreeNeuron:
-    """Connect 3D points (nm) into a pruned minimum-spanning-tree SWC neuron."""
-    n_nodes = len(pts_nm)
-    if n_nodes == 0:
-        raise ValueError(f"No 3D coordinates available to skeletonize CAVE root {root_id}.")
-    if n_nodes == 1:
-        pt = pts_nm[0] / scale
-        df = pd.DataFrame([{"node_id": 1, "parent_id": -1, "x": pt[0], "y": pt[1], "z": pt[2]}])
-        out = navis.TreeNeuron(df)
-        out.id = root_id
-        out.name = f"cave_{root_id}"
-        return out
+def _retry_call(fn, stage: str, max_attempts: int = 4, base_delay: float = 1.5, progress_callback=None):
+    """Retry transient HTTP 429/502/503/504 or connection errors with exponential backoff."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            is_transient = any(
+                code in msg
+                for code in ("503", "502", "504", "429", "temporarily unavailable", "bad gateway", "timed out", "connection reset")
+            )
+            if not is_transient or attempt == max_attempts:
+                host = _extract_host(exc)
+                where = f"{stage} ({host})" if host else stage
+                raise RuntimeError(f"[{where}] {exc}") from exc
+            wait_s = base_delay * (2 ** (attempt - 1))
+            if progress_callback:
+                progress_callback(
+                    f"Server temporarily busy during {stage} (attempt {attempt}/{max_attempts}); retrying in {wait_s:.1f}s..."
+                )
+            time.sleep(wait_s)
+    raise last_exc
 
-    tree = cKDTree(pts_nm)
-    pairs = tree.query_pairs(r=connect_radius_nm, output_type="ndarray")
-    if len(pairs) == 0:
-        k = min(4, n_nodes)
-        _, idx = tree.query(pts_nm, k=k)
-        edge_list = []
-        for i in range(n_nodes):
-            for j in idx[i, 1:]:
-                edge_list.append((min(i, int(j)), max(i, int(j))))
-        pairs = np.unique(np.asarray(edge_list, dtype=np.int32), axis=0)
 
-    u_idx = pairs[:, 0]
-    v_idx = pairs[:, 1]
-    weights = np.linalg.norm(pts_nm[u_idx] - pts_nm[v_idx], axis=1)
+def _compute_tight_mip_bbox(
+    cave_client: CAVEclient,
+    root_ids: list[int],
+    vol_seg,
+    pad_chunks: int = 1,
+    progress_callback=None,
+):
+    """Return a minimal chunk-aligned CloudVolume Bbox covering root_ids at vol_seg.mip."""
+    from cloudvolume.lib import Bbox
 
-    graph = csr_matrix((weights, (u_idx, v_idx)), shape=(n_nodes, n_nodes))
-    mst = minimum_spanning_tree(graph).tocoo()
+    full_bounds = vol_seg.bounds
+    full_min = np.asarray(full_bounds.minpt, dtype=np.int64)
+    full_max = np.asarray(full_bounds.maxpt, dtype=np.int64)
 
-    adj: list[list[tuple[int, float]]] = [[] for _ in range(n_nodes)]
-    for i, j, w in zip(mst.row, mst.col, mst.data):
-        adj[int(i)].append((int(j), float(w)))
-        adj[int(j)].append((int(i), float(w)))
+    pts_nm = []
+    for rid in root_ids:
+        got_root_pts = False
+        try:
+            l2_ids = _retry_call(
+                lambda r=int(rid): cave_client.chunkedgraph.get_leaves(r, stop_layer=2),
+                stage=f"CAVE get_leaves({rid})",
+                progress_callback=progress_callback,
+            )
+            if len(l2_ids) > 0 and getattr(cave_client, "l2cache", None) is not None:
+                id_list = [int(x) for x in l2_ids]
+                for i in range(0, len(id_list), 5000):
+                    batch = id_list[i : i + 5000]
+                    info = _retry_call(
+                        lambda b=batch: cave_client.l2cache.get_l2data(b, attributes=["rep_coord_nm"]),
+                        stage="CAVE l2cache",
+                        progress_callback=progress_callback,
+                    )
+                    for v in info.values():
+                        pt = v.get("rep_coord_nm") if isinstance(v, dict) else None
+                        if pt is not None and len(pt) == 3:
+                            pts_nm.append(pt)
+                            got_root_pts = True
+        except Exception:
+            got_root_pts = False
 
-    removed = np.zeros(n_nodes, dtype=bool)
-    for i in range(n_nodes):
-        if len(adj[i]) == 1:
-            nbr, dist = adj[i][0]
-            if len(adj[nbr]) >= 3 and dist < min_twig_nm:
-                removed[i] = True
-
-    parent = np.full(n_nodes, -1, dtype=np.int32)
-    visited = removed.copy()
-    for start in range(n_nodes):
-        if visited[start]:
+        if got_root_pts:
             continue
-        visited[start] = True
-        q = deque([start])
-        while q:
-            curr = q.popleft()
-            for nbr, _ in adj[curr]:
-                if not visited[nbr]:
-                    visited[nbr] = True
-                    parent[nbr] = curr
-                    q.append(nbr)
 
-    kept_indices = np.where(~removed)[0]
-    old_to_new = {int(old_i): new_i + 1 for new_i, old_i in enumerate(kept_indices)}
-    pts_cm = pts_nm[kept_indices] / scale
+        try:
+            mesh = _retry_call(
+                lambda r=int(rid): vol_seg.mesh.get(r, deduplicate_chunk_boundaries=False),
+                stage=f"CAVE mesh({rid})",
+                progress_callback=progress_callback,
+            )
+            m_obj = mesh[int(rid)] if isinstance(mesh, dict) else mesh
+            verts = np.asarray(m_obj.vertices, dtype=np.float64)
+            if len(verts) > 0:
+                pts_nm.append(verts.min(axis=0))
+                pts_nm.append(verts.max(axis=0))
+                got_root_pts = True
+        except Exception:
+            pass
 
-    rows = []
-    for new_i, old_i in enumerate(kept_indices):
-        p_old = int(parent[old_i])
-        p_new = old_to_new.get(p_old, -1)
-        rows.append({
-            "node_id": new_i + 1,
-            "parent_id": p_new,
-            "x": float(pts_cm[new_i, 0]),
-            "y": float(pts_cm[new_i, 1]),
-            "z": float(pts_cm[new_i, 2]),
-        })
+        if not got_root_pts:
+            return full_bounds
 
-    out = navis.TreeNeuron(pd.DataFrame(rows))
-    out.id = root_id
-    out.name = f"cave_{root_id}"
+    if not pts_nm:
+        return full_bounds
+
+    pts_arr = np.asarray(pts_nm, dtype=np.float64)
+    mip_res = np.asarray(vol_seg.resolution, dtype=np.float64)
+    chunk_sz = np.maximum(np.asarray(getattr(vol_seg, "chunk_size", [64, 64, 64])[:3], dtype=np.int64), 1)
+
+    raw_min = np.floor(pts_arr.min(axis=0) / mip_res).astype(np.int64)
+    raw_max = np.ceil(pts_arr.max(axis=0) / mip_res).astype(np.int64)
+
+    rel_min = np.floor((raw_min - full_min) / chunk_sz).astype(np.int64) - pad_chunks
+    rel_max = np.ceil((raw_max - full_min) / chunk_sz).astype(np.int64) + pad_chunks
+
+    min_vox = np.maximum(full_min + rel_min * chunk_sz, full_min)
+    max_vox = np.minimum(full_min + rel_max * chunk_sz, full_max)
+    max_vox = np.maximum(max_vox, min_vox + 1)
+    return Bbox(min_vox.tolist(), max_vox.tolist())
+
+
+def _run_kimimaro_parallel_swc(seg_subset: np.ndarray, cfg: dict) -> dict[int, str]:
+    """Run kimimaro.skeletonize with full multi-CPU parallelization even when called from a worker thread."""
+    parallel_workers = max(1, int(cfg.get("parallel", 4)))
+
+    # When called from a background thread, delegate to a dedicated child Python process whose main thread
+    # owns signal handlers, allowing kimimaro's multi-process worker pool to run at full speed.
+    if parallel_workers > 1 and threading.current_thread() is not threading.main_thread():
+        with tempfile.TemporaryDirectory(prefix="kimimaro_par_") as tmpdir:
+            seg_path = os.path.join(tmpdir, "seg.npy")
+            cfg_path = os.path.join(tmpdir, "cfg.json")
+            out_path = os.path.join(tmpdir, "skels.json")
+
+            np.save(seg_path, seg_subset)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+
+            proc = subprocess.run(
+                [sys.executable, "-c", _KIMIMARO_WORKER_CODE, seg_path, cfg_path, out_path],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                err_tail = (proc.stderr or proc.stdout or "").strip()[-1500:]
+                raise RuntimeError(f"Parallel Kimimaro worker failed (exit {proc.returncode}): {err_tail}")
+
+            with open(out_path, "r", encoding="utf-8") as f:
+                raw_map = json.load(f)
+            return {int(k): v for k, v in raw_map.items()}
+
+    import kimimaro
+
+    skels = kimimaro.skeletonize(
+        seg_subset,
+        teasar_params={
+            "scale": cfg["scale"],
+            "const": cfg["const"],
+            "pdrf_scale": cfg["pdrf_scale"],
+            "pdrf_exponent": cfg["pdrf_exponent"],
+            "soma_acceptance_threshold": cfg["pdrf_soma_acceptance_threshold"],
+            "soma_detection_threshold": cfg["pdrf_soma_detection_threshold"],
+            "soma_invalidation_const": cfg["pdrf_soma_invalidation_const"],
+            "soma_invalidation_scale": cfg["pdrf_soma_invalidation_scale"],
+            "max_paths": cfg["max_paths"],
+        },
+        dust_threshold=cfg["dust_threshold"],
+        fix_branching=True,
+        fix_borders=True,
+        fill_holes=False,
+        fix_avocados=False,
+        progress=False,
+        parallel=parallel_workers,
+        parallel_chunk_size=1,
+    )
+    return {int(rid): skel.to_swc() for rid, skel in skels.items()}
+
+
+def _postprocess_kimimaro_swc(
+    swc_text: str,
+    root_id: int,
+    bbox_offset_vox: np.ndarray,
+    mip_resolution_nm: np.ndarray,
+    catmaid_scale: np.ndarray,
+    smooth_window: int = 2,
+    resample_to_nm: float = 128.0,
+) -> navis.TreeNeuron:
+    """Replicate ZlaticLab postprocess_skeleton: voxel->nm scale, heal, smooth, resample, convert to CATMAID units."""
+    raw_neuron = navis.read_swc(swc_text, id=int(root_id))
+    if len(raw_neuron.nodes) == 0:
+        raise ValueError(f"Kimimaro produced 0 skeleton nodes for CAVE root {root_id}.")
+
+    raw_neuron.nodes[["x", "y", "z"]] = (
+        raw_neuron.nodes[["x", "y", "z"]].to_numpy(dtype=np.float64) + bbox_offset_vox
+    ) * mip_resolution_nm
+
+    healed = navis.heal_skeleton(raw_neuron)
+
+    if smooth_window and int(smooth_window) > 1 and len(healed.nodes) > int(smooth_window):
+        smoothed = navis.smooth_skeleton(healed, window=int(smooth_window))
+    else:
+        smoothed = healed
+
+    if resample_to_nm and float(resample_to_nm) > 0 and len(smoothed.nodes) > 2:
+        resampled = smoothed.resample(resample_to=float(resample_to_nm))
+    else:
+        resampled = smoothed
+
+    resampled.nodes[["x", "y", "z"]] = (
+        resampled.nodes[["x", "y", "z"]].to_numpy(dtype=np.float64) / catmaid_scale
+    )
+    resampled.id = int(root_id)
+    resampled.name = f"cave_{int(root_id)}"
+    return resampled
+
+
+def skeletonize_cave_roots_kimimaro(
+    cave_client: CAVEclient,
+    root_ids: list[int],
+    catmaid_resolution_nm: tuple[float, float, float],
+    catmaid_coord_unit: str = "nm",
+    mip: int = 3,
+    resample_to_nm: float = 128.0,
+    smooth_window: int = 2,
+    parallel: int = 4,
+    progress_callback=None,
+) -> dict[int, navis.TreeNeuron]:
+    """Batch-skeletonize CAVE roots using ZlaticLab's Kimimaro TEASAR + navis pipeline."""
+    try:
+        import kimimaro  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "kimimaro is required for CAVE skeletonization. Install it with: pip install kimimaro"
+        ) from exc
+
+    clean_ids = [int(r) for r in root_ids if int(r) != 0]
+    if not clean_ids:
+        raise ValueError("No valid (non-zero) CAVE segment IDs provided.")
+
+    cfg = DEFAULT_KIMIMARO_CONFIG.copy()
+    cfg["mip"] = int(mip)
+    cfg["resample_to"] = float(resample_to_nm)
+    cfg["smooth_window"] = int(smooth_window)
+    cfg["parallel"] = max(1, int(parallel))
+
+    if progress_callback:
+        progress_callback(f"Opening CAVE segmentation volume at mip={cfg['mip']}...")
+
+    vol_seg = _retry_call(
+        lambda: cave_client.info.segmentation_cloudvolume(agglomerate=True, mip=cfg["mip"]),
+        stage=f"CAVE segmentation_cloudvolume(mip={cfg['mip']})",
+        progress_callback=progress_callback,
+    )
+    vol_seg.fill_missing = True
+    vol_seg.progress = False
+
+    if progress_callback:
+        progress_callback(f"Computing tight bounding box for {len(clean_ids)} segment(s)...")
+
+    dl_bbox = _compute_tight_mip_bbox(
+        cave_client,
+        clean_ids,
+        vol_seg,
+        pad_chunks=1,
+        progress_callback=progress_callback,
+    )
+    box_vox = np.asarray(dl_bbox.size3(), dtype=np.int64)
+
+    if progress_callback:
+        progress_callback(
+            f"Downloading segmentation at mip={cfg['mip']} ({box_vox[0]}x{box_vox[1]}x{box_vox[2]} voxels)..."
+        )
+
+    seg_subset = _retry_call(
+        lambda: vol_seg.download(bbox=dl_bbox, agglomerate=False, segids=clean_ids),
+        stage=f"CloudVolume download(mip={cfg['mip']})",
+        progress_callback=progress_callback,
+    )
+    if seg_subset.ndim == 4:
+        seg_subset = seg_subset[:, :, :, 0]
+
+    if progress_callback:
+        progress_callback(
+            f"Running Kimimaro TEASAR skeletonization at mip={cfg['mip']} ({cfg['parallel']} worker(s))..."
+        )
+
+    swc_by_id = _run_kimimaro_parallel_swc(seg_subset, cfg)
+
+    bbox_offset_vox = np.asarray(dl_bbox.minpt, dtype=np.float64)
+    mip_resolution_nm = np.asarray(vol_seg.resolution, dtype=np.float64)
+    catmaid_scale = (
+        np.asarray(catmaid_resolution_nm, dtype=np.float64)
+        if catmaid_coord_unit == "voxels"
+        else np.ones(3, dtype=np.float64)
+    )
+
+    out: dict[int, navis.TreeNeuron] = {}
+    for rid in clean_ids:
+        if rid not in swc_by_id:
+            raise ValueError(
+                f"Kimimaro found no voxels for CAVE root {rid} at mip={cfg['mip']}. "
+                f"Try lowering MIP (e.g. mip=3) or verify the segment ID is current."
+            )
+        if progress_callback:
+            progress_callback(f"Healing, smoothing & resampling skeleton for {rid}...")
+        out[rid] = _postprocess_kimimaro_swc(
+            swc_by_id[rid],
+            root_id=rid,
+            bbox_offset_vox=bbox_offset_vox,
+            mip_resolution_nm=mip_resolution_nm,
+            catmaid_scale=catmaid_scale,
+            smooth_window=cfg["smooth_window"],
+            resample_to_nm=cfg["resample_to"],
+        )
     return out
 
 
@@ -148,77 +394,23 @@ def skeletonize_cave_root(
     root_id: int,
     catmaid_resolution_nm: tuple[float, float, float],
     catmaid_coord_unit: str = "nm",
-    min_twig_nm: float = 250.0,
+    mip: int = 3,
+    resample_to_nm: float = 128.0,
+    smooth_window: int = 2,
+    parallel: int = 4,
 ) -> navis.TreeNeuron:
-    """Build an acyclic 3D skeleton from a CAVE segment (via l2cache if running, else CloudVolume mesh)."""
-    root_id = int(root_id)
-    scale = (
-        np.asarray(catmaid_resolution_nm, dtype=np.float64)
-        if catmaid_coord_unit == "voxels"
-        else np.ones(3, dtype=np.float64)
+    """Skeletonize a single CAVE root using ZlaticLab's Kimimaro + navis pipeline."""
+    res = skeletonize_cave_roots_kimimaro(
+        cave_client=cave_client,
+        root_ids=[int(root_id)],
+        catmaid_resolution_nm=catmaid_resolution_nm,
+        catmaid_coord_unit=catmaid_coord_unit,
+        mip=mip,
+        resample_to_nm=resample_to_nm,
+        smooth_window=smooth_window,
+        parallel=parallel,
     )
-
-    if getattr(cave_client, "l2cache", None) is not None:
-        try:
-            import pcg_skel
-
-            sig_params = inspect.signature(pcg_skel.pcg_skeleton).parameters
-            skel_kwargs = {"root_id": root_id, "client": cave_client}
-            if "refine" in sig_params:
-                skel_kwargs["refine"] = None
-            if "invalidation_d" in sig_params:
-                skel_kwargs["invalidation_d"] = 500
-
-            sk = pcg_skel.pcg_skeleton(**skel_kwargs)
-            verts_cm = np.asarray(sk.vertices, dtype=np.float64) / scale
-            if len(verts_cm) > 0:
-                parents = np.asarray(sk.parent_nodes(np.arange(len(verts_cm))), dtype=np.int64)
-                df = pd.DataFrame({
-                    "node_id": np.arange(1, len(verts_cm) + 1, dtype=np.int64),
-                    "parent_id": np.where(parents >= 0, parents + 1, -1),
-                    "x": verts_cm[:, 0],
-                    "y": verts_cm[:, 1],
-                    "z": verts_cm[:, 2],
-                })
-                out = navis.TreeNeuron(df)
-                out.id = root_id
-                out.name = f"cave_{root_id}"
-                return out
-        except Exception:
-            pass
-
-    mesh = _fetch_cave_mesh(cave_client, root_id)
-    verts_nm = np.asarray(mesh.vertices, dtype=np.float64)
-    if len(verts_nm) == 0:
-        raise ValueError(f"CAVE root {root_id} mesh has 0 vertices.")
-
-    try:
-        import skeletor as sk
-
-        tm = sk.utilities.make_trimesh(mesh, validate=True)
-        to_remove = max(1, int(0.0001 * len(tm.vertices)))
-        tm = sk.pre.fix_mesh(tm, inplace=True, remove_disconnected=to_remove)
-        s = sk.skeletonize.by_wavefront(tm, waves=1, step_size=1, progress=False)
-        swc = s.swc.copy()
-        swc["node_id"] = swc["node_id"].astype(np.int64) + 1
-        swc["parent_id"] = np.where(swc["parent_id"] >= 0, swc["parent_id"].astype(np.int64) + 1, -1)
-        swc[["x", "y", "z"]] = swc[["x", "y", "z"]].to_numpy(dtype=np.float64) / scale
-        out = navis.TreeNeuron(swc[["node_id", "parent_id", "x", "y", "z"]])
-        out.id = root_id
-        out.name = f"cave_{root_id}"
-        return out
-    except ImportError:
-        pass
-
-    voxel_keys = np.floor(verts_nm / 200.0).astype(np.int64)
-    _, inv = np.unique(voxel_keys, axis=0, return_inverse=True)
-    counts = np.bincount(inv).astype(np.float64)
-    centroids_nm = np.column_stack([
-        np.bincount(inv, weights=verts_nm[:, 0]) / counts,
-        np.bincount(inv, weights=verts_nm[:, 1]) / counts,
-        np.bincount(inv, weights=verts_nm[:, 2]) / counts,
-    ])
-    return _points_to_mst_neuron(centroids_nm, root_id=root_id, scale=scale, min_twig_nm=min_twig_nm)
+    return res[int(root_id)]
 
 
 def _max_chord_deviation_nm(pts_nm: np.ndarray, idx_a: int, idx_b: int) -> float:
@@ -357,7 +549,6 @@ def _build_neuron_specific_boxes(
         pts = nodes[["x", "y", "z"]].to_numpy(dtype=np.float64) * scale
         sample_chunks.append(pts)
 
-        # Densify along skeleton edges so long segments never skip an intermediate grid cell
         by_id = nodes.set_index("node_id")[["x", "y", "z"]]
         valid = nodes[nodes["parent_id"].isin(by_id.index)]
         if not valid.empty:
@@ -374,7 +565,6 @@ def _build_neuron_specific_boxes(
     while True:
         cells = np.unique(np.floor(all_pts / tile_size_nm).astype(np.int64), axis=0)
 
-        # Merge contiguous runs along X, then Y, then Z into tight non-overlapping sub-boxes
         cells = cells[np.lexsort((cells[:, 0], cells[:, 1], cells[:, 2]))]
         x_runs = []
         for ix, iy, iz in cells:
@@ -455,7 +645,6 @@ def _fetch_skids_in_local_boxes(
                 found = found.get("skeleton_ids") or found.get("skids") or []
             skids.update(int(s) for s in (found or []))
         except Exception:
-            # Fallback to CATMAID's node/list endpoint if skeletons/in-bounding-box is unavailable
             url = rm.make_url(rm.project_id, "node", "list")
             res = rm.fetch(
                 url,
@@ -476,38 +665,51 @@ def _fetch_skids_in_local_boxes(
     return skids
 
 
-def load_manual_catmaid_trees(
+def load_existing_catmaid_trees(
     rm: pymaid.CatmaidInstance,
     search_annotations: str = "",
     local_boxes_nm: list[tuple[float, float, float, float, float, float]] | None = None,
     catmaid_resolution_nm: tuple[float, float, float] = (8.0, 8.0, 16.0),
     catmaid_coord_unit: str = "nm",
+    progress_callback=None,
 ) -> tuple[dict[int, dict], pd.DataFrame]:
-    """Load candidate CATMAID neurons and keep ONLY manually traced nodes (excluding 'cave_imported')."""
+    """Load candidate CATMAID neurons and their existing traced nodes."""
     skids: set[int] = set()
     ann_list = [a.strip() for a in search_annotations.split(",") if a.strip()]
 
     if ann_list:
         for ann in ann_list:
             try:
-                found = pymaid.get_skids_by_annotation(ann, remote_instance=rm)
+                found = _retry_call(
+                    lambda a=ann: pymaid.get_skids_by_annotation(a, remote_instance=rm),
+                    stage=f"CATMAID annotation '{ann}'",
+                    progress_callback=progress_callback,
+                )
                 skids.update(int(s) for s in found)
             except Exception:
                 continue
     elif local_boxes_nm:
         skids.update(
-            _fetch_skids_in_local_boxes(
-                rm,
-                boxes_nm=local_boxes_nm,
-                catmaid_resolution_nm=catmaid_resolution_nm,
-                catmaid_coord_unit=catmaid_coord_unit,
+            _retry_call(
+                lambda: _fetch_skids_in_local_boxes(
+                    rm,
+                    boxes_nm=local_boxes_nm,
+                    catmaid_resolution_nm=catmaid_resolution_nm,
+                    catmaid_coord_unit=catmaid_coord_unit,
+                ),
+                stage="CATMAID local bounding-box query",
+                progress_callback=progress_callback,
             )
         )
 
     if not skids:
         return {}, pd.DataFrame()
 
-    neurons = pymaid.get_neurons(list(skids), remote_instance=rm)
+    neurons = _retry_call(
+        lambda: pymaid.get_neurons(list(skids), remote_instance=rm),
+        stage="CATMAID get_neurons",
+        progress_callback=progress_callback,
+    )
     scale = (
         np.asarray(catmaid_resolution_nm, dtype=np.float64)
         if catmaid_coord_unit == "voxels"
@@ -519,31 +721,27 @@ def load_manual_catmaid_trees(
 
     for n in neurons:
         skid = int(n.id)
-        nodes = n.nodes.copy()
-        tags = n.tags if isinstance(n.tags, dict) else {}
-        imported_ids = set(int(nid) for nid in tags.get("cave_imported", []))
-
-        manual = nodes[~nodes["node_id"].isin(imported_ids)].copy()
-        if manual.empty:
+        existing = n.nodes.copy()
+        if existing.empty:
             continue
 
-        manual["node_id"] = manual["node_id"].astype(int)
-        manual["parent_id"] = manual["parent_id"].fillna(-1).astype(int)
-        coords_nm = manual[["x", "y", "z"]].to_numpy(dtype=np.float64) * scale
-        manual["x_nm"] = coords_nm[:, 0]
-        manual["y_nm"] = coords_nm[:, 1]
-        manual["z_nm"] = coords_nm[:, 2]
+        existing["node_id"] = existing["node_id"].astype(int)
+        existing["parent_id"] = existing["parent_id"].fillna(-1).astype(int)
+        coords_nm = existing[["x", "y", "z"]].to_numpy(dtype=np.float64) * scale
+        existing["x_nm"] = coords_nm[:, 0]
+        existing["y_nm"] = coords_nm[:, 1]
+        existing["z_nm"] = coords_nm[:, 2]
 
         trees_by_skid[skid] = {
             "skeleton_id": skid,
             "name": str(n.name or f"neuron_{skid}"),
-            "manual_nodes": manual,
+            "existing_nodes": existing,
         }
 
-        parent_ids = set(manual["parent_id"])
-        internal = manual[manual["node_id"].isin(parent_ids)].copy()
+        parent_ids = set(existing["parent_id"])
+        internal = existing[existing["node_id"].isin(parent_ids)].copy()
         if internal.empty:
-            internal = manual.copy()
+            internal = existing.copy()
         internal["skeleton_id"] = skid
         internal_records.append(internal[["skeleton_id", "node_id", "parent_id", "x", "y", "z"]])
 
@@ -551,14 +749,14 @@ def load_manual_catmaid_trees(
     return trees_by_skid, internal_df
 
 
-def _point_to_segments_min_dist(pts_nm: np.ndarray, manual_df: pd.DataFrame) -> np.ndarray:
-    """Compute minimum 3D distance (nm) from each point in pts_nm to manual_df's parent->child segments."""
-    m_pts = manual_df[["x_nm", "y_nm", "z_nm"]].to_numpy(dtype=np.float64)
-    if len(manual_df) < 2:
+def _point_to_segments_min_dist(pts_nm: np.ndarray, existing_df: pd.DataFrame) -> np.ndarray:
+    """Compute minimum 3D distance (nm) from each point in pts_nm to existing_df's parent->child segments."""
+    m_pts = existing_df[["x_nm", "y_nm", "z_nm"]].to_numpy(dtype=np.float64)
+    if len(existing_df) < 2:
         return cdist(pts_nm, m_pts).min(axis=1)
 
-    by_id = manual_df.set_index("node_id")[["x_nm", "y_nm", "z_nm"]]
-    valid = manual_df[manual_df["parent_id"].isin(by_id.index)]
+    by_id = existing_df.set_index("node_id")[["x_nm", "y_nm", "z_nm"]]
+    valid = existing_df[existing_df["parent_id"].isin(by_id.index)]
     if valid.empty:
         return cdist(pts_nm, m_pts).min(axis=1)
 
@@ -626,29 +824,54 @@ def build_cave_export_plan(
     cave_resolution_nm: tuple[float, float, float],
     catmaid_resolution_nm: tuple[float, float, float],
     catmaid_coord_unit: str = "nm",
+    base_neuron_name: str = "",
     search_annotations: str = "",
     cut_buffer_nm: float = 400.0,
     slice_step: int = 4,
+    mip: int = 3,
+    resample_to_nm: float = 128.0,
+    parallel: int = 4,
     min_fragment_nodes: int = 3,
     progress_callback=None,
 ) -> tuple[list[dict], dict]:
-    """Skeletonize CAVE roots, pair with manual CATMAID nodes in the neuron-specific area, cut & decimate."""
-    unique_roots = list(dict.fromkeys(int(r) for r in cave_root_ids))
+    """Skeletonize CAVE roots with Kimimaro, pair with existing CATMAID nodes, cut & decimate."""
+    raw_unique = list(dict.fromkeys(int(r) for r in cave_root_ids))
     scale = (
         np.asarray(catmaid_resolution_nm, dtype=np.float64)
         if catmaid_coord_unit == "voxels"
         else np.ones(3, dtype=np.float64)
     )
 
-    cave_skeletons: dict[int, navis.TreeNeuron] = {}
-    for idx, rid in enumerate(unique_roots, start=1):
-        if progress_callback:
-            progress_callback(f"Skeletonizing CAVE root {rid} ({idx}/{len(unique_roots)})...")
-        if not cave_client.chunkedgraph.is_latest_roots([rid])[0]:
-            latest = cave_client.chunkedgraph.get_latest_roots(rid)
+    if progress_callback:
+        progress_callback("Verifying latest CAVE root IDs...")
+
+    latest_roots: list[int] = []
+    for rid in raw_unique:
+        is_latest = _retry_call(
+            lambda r=rid: cave_client.chunkedgraph.is_latest_roots([r])[0],
+            stage=f"CAVE is_latest_roots({rid})",
+            progress_callback=progress_callback,
+        )
+        if not is_latest:
+            latest = _retry_call(
+                lambda r=rid: cave_client.chunkedgraph.get_latest_roots(r),
+                stage=f"CAVE get_latest_roots({rid})",
+                progress_callback=progress_callback,
+            )
             rid = int(latest[0])
-        nrn = skeletonize_cave_root(cave_client, rid, catmaid_resolution_nm, catmaid_coord_unit)
-        cave_skeletons[rid] = nrn
+        if rid not in latest_roots:
+            latest_roots.append(rid)
+
+    cave_skeletons = skeletonize_cave_roots_kimimaro(
+        cave_client=cave_client,
+        root_ids=latest_roots,
+        catmaid_resolution_nm=catmaid_resolution_nm,
+        catmaid_coord_unit=catmaid_coord_unit,
+        mip=mip,
+        resample_to_nm=resample_to_nm,
+        parallel=parallel,
+        progress_callback=progress_callback,
+    )
 
     local_boxes_nm = None
     if not search_annotations.strip():
@@ -660,32 +883,38 @@ def build_cave_export_plan(
         if progress_callback:
             progress_callback(f"Checking neuron-specific neighborhood ({len(local_boxes_nm)} tight local sub-boxes)...")
     elif progress_callback:
-        progress_callback("Loading manual CATMAID skeletons from search annotations...")
+        progress_callback("Loading existing CATMAID skeletons from search annotations...")
 
-    trees_by_skid, internal_df = load_manual_catmaid_trees(
+    trees_by_skid, internal_df = load_existing_catmaid_trees(
         rm,
         search_annotations=search_annotations,
         local_boxes_nm=local_boxes_nm,
         catmaid_resolution_nm=catmaid_resolution_nm,
         catmaid_coord_unit=catmaid_coord_unit,
+        progress_callback=progress_callback,
     )
 
     root_to_skids: dict[int, list[tuple[int, int]]] = {}
     if not internal_df.empty:
-        mapped_cm = map_nodes_to_cave(
-            internal_df,
-            cave_client,
-            catmaid_resolution_nm=catmaid_resolution_nm,
-            cave_resolution_nm=cave_resolution_nm,
-            catmaid_coord_unit=catmaid_coord_unit,
+        mapped_cm = _retry_call(
+            lambda: map_nodes_to_cave(
+                internal_df,
+                cave_client,
+                catmaid_resolution_nm=catmaid_resolution_nm,
+                cave_resolution_nm=cave_resolution_nm,
+                catmaid_coord_unit=catmaid_coord_unit,
+            ),
+            stage="CAVE map_nodes_to_cave",
+            progress_callback=progress_callback,
         )
         for (r_id, skid), grp in mapped_cm.groupby(["root_id", "skeleton_id"]):
             root_to_skids.setdefault(int(r_id), []).append((int(skid), int(len(grp))))
 
+    user_base = (base_neuron_name or "").strip()
     plan_rows = []
     bundle_items = {}
 
-    for rid, nrn in cave_skeletons.items():
+    for root_idx, (rid, nrn) in enumerate(cave_skeletons.items(), start=1):
         total_nodes = int(len(nrn.nodes))
         cave_pts_nm = nrn.nodes[["x", "y", "z"]].to_numpy(dtype=np.float64) * scale
 
@@ -695,19 +924,24 @@ def build_cave_export_plan(
         if not matched_skids:
             match_type = "0-Match (New)"
             master_skid = None
-            base_name = f"cave_{rid}"
             keep_mask = np.ones(total_nodes, dtype=bool)
-            combined_manual = pd.DataFrame()
+            combined_existing = pd.DataFrame()
         else:
             master_skid = matched_skids[0]
-            base_name = trees_by_skid[master_skid]["name"]
             match_type = "1-to-1 Match" if len(matched_skids) == 1 else f"1-to-Many ({len(matched_skids)} SKIDs)"
-            combined_manual = pd.concat(
-                [trees_by_skid[s]["manual_nodes"] for s in matched_skids],
+            combined_existing = pd.concat(
+                [trees_by_skid[s]["existing_nodes"] for s in matched_skids],
                 ignore_index=True,
             )
-            min_dists = _point_to_segments_min_dist(cave_pts_nm, combined_manual)
+            min_dists = _point_to_segments_min_dist(cave_pts_nm, combined_existing)
             keep_mask = min_dists > float(cut_buffer_nm)
+
+        if user_base:
+            base_name = user_base.replace("{n}", str(root_idx)) if "{n}" in user_base else user_base
+        elif master_skid is not None:
+            base_name = trees_by_skid[master_skid]["name"]
+        else:
+            base_name = f"cave_{rid}"
 
         raw_subtrees = _split_kept_into_subtrees(nrn, keep_mask, min_fragment_nodes=min_fragment_nodes)
         subtrees = [
@@ -724,17 +958,12 @@ def build_cave_export_plan(
         n_frags = len(subtrees)
         fragment_specs = []
         for idx_f, sub_df in enumerate(subtrees, start=1):
-            if n_frags >= 3:
-                frag_name = f"{base_name}_{idx_f}"
-            elif n_frags == 2:
-                frag_name = f"{base_name}_part{idx_f}"
-            else:
-                frag_name = base_name
+            frag_name = base_name if n_frags == 1 else f"{base_name}_{idx_f}"
 
             anchor_info = None
-            if not combined_manual.empty:
+            if not combined_existing.empty:
                 sub_pts_nm = sub_df[["x", "y", "z"]].to_numpy(dtype=np.float64) * scale
-                m_pts_nm = combined_manual[["x_nm", "y_nm", "z_nm"]].to_numpy(dtype=np.float64)
+                m_pts_nm = combined_existing[["x_nm", "y_nm", "z_nm"]].to_numpy(dtype=np.float64)
                 dmat = cdist(sub_pts_nm, m_pts_nm)
                 sub_i, man_j = np.unravel_index(np.argmin(dmat), dmat.shape)
                 anchor_info = {
@@ -749,7 +978,7 @@ def build_cave_export_plan(
                 "anchor": anchor_info,
             })
 
-        frag_names_preview = ", ".join(f["name"] for f in fragment_specs) if fragment_specs else "(already complete)"
+        frag_names_preview = ", ".join(f["name"] for f in fragment_specs) if fragment_specs else ""
         plan_rows.append({
             "approve": len(fragment_specs) > 0,
             "cave_root_id": str(rid),
@@ -792,7 +1021,10 @@ def _join_catmaid_skeletons(
     max_stitch_dist_nm: float = 2000.0,
 ) -> float:
     """Join child_skid into master_skid on the CATMAID server at their closest 3D nodes."""
-    pair = pymaid.get_neurons([int(master_skid), int(child_skid)], remote_instance=rm)
+    pair = _retry_call(
+        lambda: pymaid.get_neurons([int(master_skid), int(child_skid)], remote_instance=rm),
+        stage="CATMAID get_neurons(stitch)",
+    )
     by_id = {int(n.id): n for n in pair}
     if int(master_skid) not in by_id or int(child_skid) not in by_id:
         raise RuntimeError(f"Could not fetch skeletons {master_skid} and {child_skid} for joining.")
@@ -812,23 +1044,29 @@ def _join_catmaid_skeletons(
     child_nid = int(c_nodes.iloc[ci]["node_id"])
 
     if hasattr(pymaid, "join_skeletons"):
-        pymaid.join_skeletons(
-            int(child_skid),
-            int(master_skid),
-            from_node=child_nid,
-            to_node=master_nid,
-            remote_instance=rm,
+        _retry_call(
+            lambda: pymaid.join_skeletons(
+                int(child_skid),
+                int(master_skid),
+                from_node=child_nid,
+                to_node=master_nid,
+                remote_instance=rm,
+            ),
+            stage="CATMAID join_skeletons",
         )
     else:
         url = rm.make_url(rm.project_id, "skeleton", "join")
-        rm.fetch(
-            url,
-            post={
-                "from_id": int(child_skid),
-                "to_id": int(master_skid),
-                "from_node_id": child_nid,
-                "to_node_id": master_nid,
-            },
+        _retry_call(
+            lambda: rm.fetch(
+                url,
+                post={
+                    "from_id": int(child_skid),
+                    "to_id": int(master_skid),
+                    "from_node_id": child_nid,
+                    "to_node_id": master_nid,
+                },
+            ),
+            stage="CATMAID skeleton/join",
         )
     return min_dist
 
@@ -842,7 +1080,7 @@ def execute_cave_export_plan(
     max_stitch_dist_nm: float = 2000.0,
     progress_callback=None,
 ) -> list[dict]:
-    """Upload approved non-overlapping CAVE fragments to CATMAID, tag 'cave_imported', stitch & annotate."""
+    """Upload approved non-overlapping CAVE fragments to CATMAID without node tags, stitch & annotate."""
     ann_list = [a.strip() for a in target_annotations.split(",") if a.strip()]
     approved = [r for r in plan_rows if r.get("approve")]
     items = export_bundle.get("items", {})
@@ -864,6 +1102,7 @@ def execute_cave_export_plan(
         if progress_callback:
             progress_callback(f"[{idx}/{len(approved)}] Exporting CAVE root {rid_str} to CATMAID...")
 
+        edited_names = [x.strip() for x in str(row.get("fragment_names") or "").split(",") if x.strip()]
         master_skid = item["master_skid"]
         created_skids = []
         created_names = []
@@ -871,18 +1110,26 @@ def execute_cave_export_plan(
         notes = []
 
         try:
-            for frag in item["fragments"]:
+            for f_idx, frag in enumerate(item["fragments"]):
+                frag_name = (
+                    edited_names[f_idx]
+                    if f_idx < len(edited_names)
+                    else (edited_names[0] if len(edited_names) == 1 and len(item["fragments"]) == 1 else frag["name"])
+                )
                 sub_df = frag["nodes_df"]
                 nrn = navis.TreeNeuron(sub_df)
-                nrn.name = frag["name"]
-                nrn.tags = {"cave_imported": sub_df["node_id"].astype(int).tolist()}
+                nrn.name = frag_name
 
-                up_res = pymaid.upload_neuron(
-                    nrn,
-                    remote_instance=rm,
-                    import_tags=True,
-                    import_annotations=False,
-                    import_connectors=False,
+                up_res = _retry_call(
+                    lambda n=nrn: pymaid.upload_neuron(
+                        n,
+                        remote_instance=rm,
+                        import_tags=False,
+                        import_annotations=False,
+                        import_connectors=False,
+                    ),
+                    stage=f"CATMAID upload_neuron({frag_name})",
+                    progress_callback=progress_callback,
                 )
                 new_skid = _extract_uploaded_skid(up_res)
                 nodes_added += len(sub_df)
@@ -897,14 +1144,14 @@ def execute_cave_export_plan(
                             scale=scale,
                             max_stitch_dist_nm=max_stitch_dist_nm,
                         )
-                        notes.append(f"Stitched {frag['name']} into SKID {master_skid} ({dist_nm:.0f} nm)")
+                        notes.append(f"Stitched {frag_name} into SKID {master_skid} ({dist_nm:.0f} nm)")
                     except Exception as join_exc:
                         created_skids.append(new_skid)
-                        created_names.append(frag["name"])
-                        notes.append(f"Kept {frag['name']} (SKID {new_skid}) separate: {join_exc}")
+                        created_names.append(frag_name)
+                        notes.append(f"Kept {frag_name} (SKID {new_skid}) separate: {join_exc}")
                 else:
                     created_skids.append(new_skid)
-                    created_names.append(frag["name"])
+                    created_names.append(frag_name)
 
             if auto_stitch and master_skid is not None and len(item["paired_skids"]) > 1:
                 for sec_skid in item["paired_skids"][1:]:
@@ -927,7 +1174,11 @@ def execute_cave_export_plan(
             final_skids = list(dict.fromkeys(final_skids))
 
             if ann_list and final_skids:
-                pymaid.add_annotations(final_skids, ann_list, remote_instance=rm)
+                _retry_call(
+                    lambda: pymaid.add_annotations(final_skids, ann_list, remote_instance=rm),
+                    stage="CATMAID add_annotations",
+                    progress_callback=progress_callback,
+                )
 
             audit.append({
                 "cave_root_id": rid_str,
