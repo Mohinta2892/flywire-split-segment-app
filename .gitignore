@@ -4,3 +4,4 @@ proofreading_audit_log_*.csv
 /__pycache__
 /catmaid_cave_sync/__pycache__
 /outputs
+.Rhistory

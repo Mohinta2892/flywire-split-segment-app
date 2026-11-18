@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import splitter as bs
+import warnings
+warnings.filterwarnings("ignore", message=".*Downcasting object dtype arrays.*", category=FutureWarning)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -31,6 +33,12 @@ catmaid_state = {
     "merges": [],
     "audit": [],
     "mapped_df": None,
+    "export_status": "idle",
+    "export_progress": "",
+    "export_message": "",
+    "export_plan": [],
+    "export_bundle": None,
+    "export_audit": [],
 }
 
 
@@ -196,7 +204,7 @@ def act(job_id, action):
     return 200, ""
 
 
-# --- CATMAID-DRIVEN PROOFREADING BACKEND HELPERS ---
+# --- CATMAID-DRIVEN PROOFREADING & CAVE-TO-CATMAID EXPORT BACKEND ---
 
 def _cm_update(**kw):
     with lock:
@@ -229,6 +237,11 @@ def _cm_public_state():
             "splits": catmaid_state["splits"],
             "merges": catmaid_state["merges"],
             "audit": catmaid_state["audit"],
+            "export_status": catmaid_state["export_status"],
+            "export_progress": catmaid_state["export_progress"],
+            "export_message": catmaid_state["export_message"],
+            "export_plan": catmaid_state["export_plan"],
+            "export_audit": catmaid_state["export_audit"],
             "active_project": store.get("active_project"),
             "projects": safe_projects,
             "default_server": SERVER,
@@ -271,7 +284,6 @@ def cm_probe_resolutions(d):
         if not (ds and cm_url and cm_tok):
             return 400, {"error": "Select a sample/datastack and enter your CATMAID URL and CATMAID API token first."}
 
-        # 1. Verify CATMAID authentication first
         stacks = probe_catmaid_connection(
             server_url=cm_url,
             project_id=cm_pid,
@@ -280,7 +292,6 @@ def cm_probe_resolutions(d):
             http_password=http_pass,
         )
 
-        # 2. Verify CAVE connection & query CAVE segmentation base resolution
         kwargs = {"datastack_name": ds}
         if cave_srv:
             kwargs["server_address"] = cave_srv
@@ -512,6 +523,124 @@ def cm_start_execute(d):
     return 200, {"ok": True}
 
 
+# --- CAVE-TO-CATMAID SKELETON EXPORT WORKERS ---
+
+def _run_cm_export_plan_worker(project_name, root_ids, search_anns, cut_buffer_nm, slice_step):
+    try:
+        from catmaid_cave_sync.config import load_all_configs, init_clients_from_project
+        from catmaid_cave_sync.cave_to_catmaid import build_cave_export_plan
+
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        cfg = store["projects"][project_name]
+        cave_client, rm = init_clients_from_project(cfg)
+
+        plan_rows, bundle = build_cave_export_plan(
+            cave_root_ids=root_ids,
+            cave_client=cave_client,
+            rm=rm,
+            cave_resolution_nm=tuple(cfg["cave_resolution_nm"]),
+            catmaid_resolution_nm=tuple(cfg["catmaid_resolution_nm"]),
+            catmaid_coord_unit=cfg.get("catmaid_coord_unit", "nm"),
+            search_annotations=search_anns,
+            cut_buffer_nm=cut_buffer_nm,
+            slice_step=slice_step,
+            progress_callback=lambda msg: _cm_update(export_progress=msg),
+        )
+        _cm_update(
+            export_status="ready",
+            export_progress="",
+            export_message=f"Prepared {len(plan_rows)} CAVE segment(s) for CATMAID export.",
+            export_plan=plan_rows,
+            export_bundle=bundle,
+            export_audit=[],
+            project=project_name,
+        )
+    except Exception as exc:
+        _cm_update(
+            export_status="failed",
+            export_progress="",
+            export_message=f"Export plan failed: {brief(exc)}",
+        )
+
+
+def cm_start_export_plan(d):
+    with lock:
+        if catmaid_state["export_status"] in ("loading", "executing"):
+            return 409, {"error": "An export job is already running."}
+        project_name = (d.get("project_name") or "").strip()
+        raw_roots = str(d.get("cave_roots") or "")
+        root_ids = [int(x) for x in re.split(r"[\s,;]+", raw_roots.strip()) if x.strip().isdigit()]
+        search_anns = (d.get("search_annotations") or "").strip()
+        cut_buffer_nm = float(d.get("cut_buffer_nm") or 400.0)
+        slice_step = max(1, int(d.get("slice_step") or 4))
+        if not project_name:
+            return 400, {"error": "Select or configure a sample/project profile first."}
+        if not root_ids:
+            return 400, {"error": "Enter one or more numeric CAVE root IDs to export."}
+        _cm_update(
+            export_status="loading",
+            export_progress="Starting CAVE skeletonization...",
+            export_message="",
+            project=project_name,
+        )
+    pool.submit(_run_cm_export_plan_worker, project_name, root_ids, search_anns, cut_buffer_nm, slice_step)
+    return 200, {"ok": True}
+
+
+def _run_cm_export_exec_worker(project_name, plan_rows, bundle, target_anns, auto_stitch):
+    try:
+        from catmaid_cave_sync.config import load_all_configs, init_clients_from_project
+        from catmaid_cave_sync.cave_to_catmaid import execute_cave_export_plan
+
+        store = load_all_configs(CATMAID_CONFIG_PATH)
+        cfg = store["projects"][project_name]
+        _, rm = init_clients_from_project(cfg)
+
+        audit_rows = execute_cave_export_plan(
+            plan_rows=plan_rows,
+            export_bundle=bundle,
+            rm=rm,
+            target_annotations=target_anns,
+            auto_stitch=auto_stitch,
+            progress_callback=lambda msg: _cm_update(export_progress=msg),
+        )
+        _cm_update(
+            export_status="done",
+            export_progress="",
+            export_message=f"Exported {len(audit_rows)} segment(s) to CATMAID.",
+            export_audit=audit_rows,
+        )
+    except Exception as exc:
+        _cm_update(
+            export_status="failed",
+            export_progress="",
+            export_message=f"CATMAID export failed: {brief(exc)}",
+        )
+
+
+def cm_start_export_exec(d):
+    with lock:
+        if catmaid_state["export_status"] in ("loading", "executing"):
+            return 409, {"error": "An export job is already running."}
+        project_name = catmaid_state.get("project")
+        bundle = catmaid_state.get("export_bundle")
+        plan_rows = d.get("plan") or []
+        target_anns = (d.get("target_annotations") or "").strip()
+        auto_stitch = bool(d.get("auto_stitch", True))
+        if not project_name or not bundle:
+            return 400, {"error": "Build an export dry-run plan first."}
+        if not any(r.get("approve") for r in plan_rows):
+            return 400, {"error": "Approve at least one CAVE segment row first."}
+        _cm_update(
+            export_status="executing",
+            export_progress="Uploading skeletons to CATMAID...",
+            export_message="",
+            export_plan=plan_rows,
+        )
+    pool.submit(_run_cm_export_exec_worker, project_name, plan_rows, bundle, target_anns, auto_stitch)
+    return 200, {"ok": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass  # default logging would print the token
 
@@ -572,22 +701,30 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/catmaid/execute":
             code, payload = cm_start_execute(d)
             self.reply(code, payload)
+        elif path == "/api/catmaid/export_plan":
+            code, payload = cm_start_export_plan(d)
+            self.reply(code, payload)
+        elif path == "/api/catmaid/export_execute":
+            code, payload = cm_start_export_exec(d)
+            self.reply(code, payload)
         else:
             self.reply(404, {"error": "Not found"})
 
 
 PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Segment splitter & CATMAID proofreading</title><style>
 *{box-sizing:border-box}body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#f4f5f7;color:#1c2330}
-main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:28px 0 10px}
+main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:28px 0 10px;display:flex;align-items:center;gap:6px}
 .sub,.hint{color:#5b6472}.sub{margin:2px 0 16px}.hint{margin:12px 0 0;font-size:13px}
 .tabs{display:flex;gap:8px;border-bottom:1px solid #d5dae2;margin-bottom:20px}
-.tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;height:auto;font-weight:600;color:#5b6472}
+.tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;height:auto;font-weight:600;color:#5b6472;display:inline-flex;align-items:center;gap:6px}
 .tab:hover{background:transparent;color:#1c2330}.tab.active{color:#2b59c3;border-bottom-color:#2b59c3}
 .panel{display:none}.panel.active{display:block}
 .card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card,div.pad{padding:18px 20px}.scroll{overflow-x:auto}
 .fields{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap}label{display:grid;gap:4px;font-size:12px;font-weight:600;color:#5b6472}
+.lbl-row{display:inline-flex;align-items:center;gap:5px}
 label.check{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:400;color:inherit;height:34px}
-input:not([type=checkbox]),select{font:inherit;font-weight:400;color:inherit;height:34px;padding:0 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff}#root{width:220px}#rounds{width:76px}
+input:not([type=checkbox]),select,textarea{font:inherit;font-weight:400;color:inherit;padding:6px 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff}
+input:not([type=checkbox]),select{height:34px;padding:0 10px}#root{width:220px}#rounds{width:76px}
 button{font:inherit;font-weight:500;white-space:nowrap;height:30px;padding:0 12px;border:1px solid #cdd2da;border-radius:6px;background:#fff;color:inherit;cursor:pointer}button:hover{background:#f1f3f5}
 .primary{height:34px;padding:0 18px;background:#2b59c3;border-color:#2b59c3;color:#fff}.primary:hover{background:#234aa3}.danger{background:#b3261e;border-color:#b3261e;color:#fff}.danger:hover{background:#94201a}
 table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;color:#5b6472;background:#fafbfc}th,td{border-bottom:1px solid #eceef1;padding:10px 14px;text-align:left;vertical-align:top}tr:last-child td{border-bottom:0}
@@ -595,69 +732,81 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
 .s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}
 .copy{height:22px;padding:0 8px;margin-left:8px;font-size:12px;color:#5b6472;vertical-align:baseline}.msg{user-select:text}
 .top{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.helplink{color:#2b59c3;font-weight:500;text-decoration:none}.helplink:hover{text-decoration:underline}
-#err,#cm-err{color:#b3261e;margin-top:10px}#err:empty,#cm-err:empty{display:none}td:first-child{white-space:nowrap}
+#err,#cm-err,#exp-err{color:#b3261e;margin-top:10px}#err:empty,#cm-err:empty,#exp-err:empty{display:none}td:first-child{white-space:nowrap}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0}
 .metric{background:#fff;border:1px solid #e1e4e9;border-radius:8px;padding:12px 16px}.metric .v{font-size:20px;font-weight:600;margin-top:2px}
 .box{border:1px solid #d5dae2;border-radius:8px;padding:14px 16px;margin-top:14px;background:#fafbfc}.hide{display:none}
 .ngl{display:inline-block;margin-left:8px;color:#2b59c3;font-weight:500;text-decoration:none}.ngl:hover{text-decoration:underline}
 .ok{color:#17663a;font-weight:600}
+.tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid #b8c0cc;color:#5b6472;font:600 10px/1 system-ui,sans-serif;cursor:help;opacity:.35;transition:opacity .15s,border-color .15s,color .15s,background .15s;user-select:none;flex-shrink:0}
+label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opacity:1;border-color:#2b59c3;color:#2b59c3;background:#eef3fd;outline:none}
+#tooltip{position:fixed;z-index:9999;max-width:300px;padding:8px 11px;border-radius:7px;background:#1c2330;color:#fff;font:400 12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 6px 18px #10182838;pointer-events:none;opacity:0;transition:opacity .12s}
+#tooltip.show{opacity:1}
 </style></head><body><main>
 <div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split or merge is a real chunkedgraph edit.</p>
 
 <nav class="tabs" role="tablist">
-  <button type="button" class="tab active" data-tab="auto">Length-Based Auto Split</button>
-  <button type="button" class="tab" data-tab="catmaid">CATMAID-Driven Split &amp; Merge</button>
+  <button type="button" class="tab active" data-tab="auto">Length-Based Auto Split <span class="tip" tabindex="0" data-tip="Automatically cut a single large CAVE false-merge segment at its most distant endpoints without needing CATMAID tracings.">i</span></button>
+  <button type="button" class="tab" data-tab="catmaid">CATMAID-Driven Split &amp; Merge <span class="tip" tabindex="0" data-tip="Bidirectional sync: (1) use CATMAID skeletons to split/merge CAVE segments, and (2) export proofread CAVE skeletons back into CATMAID.">i</span></button>
 </nav>
 
 <section id="panel-auto" class="panel active">
-<form id="f" class="card"><div class="fields"><label>Sample <select id="sample"></select></label>
-<label>Segment <input id="root" required inputmode="numeric" autocomplete="off"></label>
-<label>Rounds <input id="rounds" type="number" min="1" value="1" required></label>
-<label class="check"><input id="preview" type="checkbox" checked> Preview first</label><button class="primary">Start</button></div>
+<form id="f" class="card"><div class="fields">
+  <label><span class="lbl-row">Sample <span class="tip" tabindex="0" data-tip="Target CAVE volume / datastack configured in config.json.">i</span></span><select id="sample"></select></label>
+  <label><span class="lbl-row">Segment <span class="tip" tabindex="0" data-tip="64-bit CAVE segment root_id of the merged object you want to split.">i</span></span><input id="root" required inputmode="numeric" autocomplete="off"></label>
+  <label><span class="lbl-row">Rounds <span class="tip" tabindex="0" data-tip="Number of recursive binary split rounds (1 round = 1 cut into 2 pieces; N rounds = up to 2^N - 1 cuts).">i</span></span><input id="rounds" type="number" min="1" value="1" required></label>
+  <label class="check"><input id="preview" type="checkbox" checked> Preview first <span class="tip" tabindex="0" data-tip="Simulate the min-cut first without editing CAVE. If the preview passes quality checks, the split runs automatically.">i</span></label>
+  <button class="primary">Start</button>
+</div>
 <p id="hint" class="hint"></p><div id="err" role="alert"></div></form>
-<h2>Progress</h2><div class="card scroll"><table id="jobs"></table></div>
+<h2>Progress <span class="tip" tabindex="0" data-tip="Live status of queued, previewing, and completed auto-split jobs.">i</span></h2><div class="card scroll"><table id="jobs"></table></div>
 </section>
 
 <section id="panel-catmaid" class="panel">
   <div class="card pad">
     <div class="fields">
-      <label>Sample / Project Profile <select id="cm-proj"></select></label>
+      <label><span class="lbl-row">Sample / Project Profile <span class="tip" tabindex="0" data-tip="Saved CAVE + CATMAID connection profile. Choose '+ Custom Project' to configure a new dataset.">i</span></span><select id="cm-proj"></select></label>
       <button type="button" id="cm-toggle-setup">Edit CATMAID / Resolution Setup</button>
+      <span class="tip" tabindex="0" data-tip="Show or hide server URLs, authentication credentials, and voxel resolution settings for the selected project.">i</span>
     </div>
     <p id="cm-proj-info" class="hint"></p>
 
     <div id="cm-setup-box" class="box hide">
       <div class="fields">
-        <label>Project Name <input id="cm-name" placeholder="e.g. Parker-Goog"></label>
-        <label>CAVE Datastack <input id="cm-ds" style="width:320px" placeholder="From config.json"></label>
-        <label>CAVE Server URL <input id="cm-srv" style="width:320px" placeholder="From config.json"></label>
+        <label><span class="lbl-row">Project Name <span class="tip" tabindex="0" data-tip="Local profile name (e.g., Parker-Goog) used to store credentials and cache downloaded CATMAID skeletons.">i</span></span><input id="cm-name" placeholder="e.g. Parker-Goog"></label>
+        <label><span class="lbl-row">CAVE Datastack <span class="tip" tabindex="0" data-tip="CAVE segmentation datastack name from config.json.">i</span></span><input id="cm-ds" style="width:320px" placeholder="From config.json"></label>
+        <label><span class="lbl-row">CAVE Server URL <span class="tip" tabindex="0" data-tip="CAVE host URL (e.g., https://global.daf-apis.com). Uses your saved local CAVE token automatically.">i</span></span><input id="cm-srv" style="width:320px" placeholder="From config.json"></label>
       </div>
       <div class="fields" style="margin-top:12px">
-        <label>CATMAID Server URL <input id="cm-url" style="width:320px" placeholder="https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem"></label>
-        <label>CATMAID Project ID <input id="cm-pid" type="number" min="1" value="15" style="width:105px"></label>
-        <label>CATMAID API Token <input id="cm-tok" type="password" placeholder="CATMAID API token"></label>
-        <label>HTTP User (if required) <input id="cm-http-user" style="width:150px" placeholder="neurophyla user"></label>
-        <label>HTTP Password <input id="cm-http-pass" type="password" style="width:150px" placeholder="HTTP password"></label>
+        <label><span class="lbl-row">CATMAID Server URL <span class="tip" tabindex="0" data-tip="Base CATMAID URL without '?pid=...' (e.g., https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem).">i</span></span><input id="cm-url" style="width:320px" placeholder="https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem"></label>
+        <label><span class="lbl-row">CATMAID Project ID <span class="tip" tabindex="0" data-tip="Numeric project ID ('pid=...') from your CATMAID browser address bar.">i</span></span><input id="cm-pid" type="number" min="1" value="15" style="width:105px"></label>
+        <label><span class="lbl-row">CATMAID API Token <span class="tip" tabindex="0" data-tip="Your 40-character personal CATMAID API token (in CATMAID: click your username top-right -> API token).">i</span></span><input id="cm-tok" type="password" placeholder="CATMAID API token"></label>
+        <label><span class="lbl-row">HTTP User (if required) <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth username if your server shows a browser login popup before CATMAID loads.">i</span></span><input id="cm-http-user" style="width:150px" placeholder="neurophyla user"></label>
+        <label><span class="lbl-row">HTTP Password <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth password (Phase 1 popup password, not your CATMAID account password).">i</span></span><input id="cm-http-pass" type="password" placeholder="HTTP password"></label>
         <button type="button" id="cm-probe">1. Verify Connection &amp; Query</button>
+        <span class="tip" tabindex="0" data-tip="Test both CATMAID and CAVE authentication and auto-query available image stacks and voxel resolutions.">i</span>
       </div>
       <p id="cm-probe-msg" class="hint"></p>
       <div id="cm-res-box" class="fields" style="margin-top:12px">
-        <label>CATMAID Stack <select id="cm-stack"><option value="">Verify connection or enter below</option></select></label>
-        <label>CATMAID Resolution (x,y,z nm) <input id="cm-res" placeholder="e.g. 8,8,16"></label>
-        <label>CAVE Resolution (x,y,z nm) <input id="cm-cave-res" placeholder="Queried from CAVE"></label>
-        <label>CATMAID Coord Unit <select id="cm-unit"><option value="nm">nm</option><option value="voxels">voxels</option></select></label>
+        <label><span class="lbl-row">CATMAID Stack <span class="tip" tabindex="0" data-tip="Image stack found in this CATMAID project; selecting one fills its resolution if exposed by the server.">i</span></span><select id="cm-stack"><option value="">Verify connection or enter below</option></select></label>
+        <label><span class="lbl-row">CATMAID Resolution (x,y,z nm) <span class="tip" tabindex="0" data-tip="Physical voxel size in nanometers (e.g., 8,8,16) used to align CATMAID tracings with CAVE.">i</span></span><input id="cm-res" placeholder="e.g. 8,8,16"></label>
+        <label><span class="lbl-row">CAVE Resolution (x,y,z nm) <span class="tip" tabindex="0" data-tip="Base segmentation voxel resolution in nanometers queried from CAVE.">i</span></span><input id="cm-cave-res" placeholder="Queried from CAVE"></label>
+        <label><span class="lbl-row">CATMAID Coord Unit <span class="tip" tabindex="0" data-tip="Units used by CATMAID skeleton node coordinates ('nm' in almost all projects, or 'voxels').">i</span></span><select id="cm-unit"><option value="nm">nm</option><option value="voxels">voxels</option></select></label>
         <button type="button" id="cm-save-proj" class="primary">2. Save Project Profile</button>
+        <span class="tip" tabindex="0" data-tip="Save credentials and resolutions locally in .cave_catmaid_config.json so you don't need to re-enter them.">i</span>
       </div>
     </div>
   </div>
 
-  <div class="card pad" style="margin-top:16px">
+  <h2>1. CATMAID &rarr; CAVE: Proofread CAVE Segments from CATMAID Skeletons <span class="tip" tabindex="0" data-tip="Use manual CATMAID skeletons as ground truth to detect and fix false merges (splits) and false splits (merges) in CAVE.">i</span></h2>
+  <div class="card pad">
     <div class="fields">
-      <label>Load Skeletons By <select id="cm-mode"><option value="annotation">CATMAID Annotation</option><option value="skids">Skeleton IDs (comma-separated)</option></select></label>
-      <label>Annotation or Skeleton IDs <input id="cm-query" style="width:300px" placeholder="e.g. Parker_batch_1 or 12345, 67890"></label>
-      <label>Min Nodes / Side <input id="cm-min-nodes" type="number" min="1" value="3" style="width:95px"></label>
-      <label class="check"><input id="cm-refresh" type="checkbox"> Re-download SWCs</label>
+      <label><span class="lbl-row">Load Skeletons By <span class="tip" tabindex="0" data-tip="Fetch CATMAID skeletons either by a shared annotation tag or by explicit skeleton IDs.">i</span></span><select id="cm-mode"><option value="annotation">CATMAID Annotation</option><option value="skids">Skeleton IDs (comma-separated)</option></select></label>
+      <label><span class="lbl-row">Annotation or Skeleton IDs <span class="tip" tabindex="0" data-tip="Exact CATMAID annotation (e.g., MBON_i1) or comma-separated skeleton IDs (e.g., 12345, 67890).">i</span></span><input id="cm-query" style="width:300px" placeholder="e.g. MBON_i1 or 12345, 67890"></label>
+      <label><span class="lbl-row">Min Nodes / Side <span class="tip" tabindex="0" data-tip="Minimum internal CATMAID nodes required on each side of a conflict to propose a split or merge (filters tip noise).">i</span></span><input id="cm-min-nodes" type="number" min="1" value="3" style="width:95px"></label>
+      <label class="check"><input id="cm-refresh" type="checkbox"> Re-download SWCs <span class="tip" tabindex="0" data-tip="Ignore cached SWC files on disk and download fresh skeleton geometries from CATMAID.">i</span></label>
       <button type="button" id="cm-plan-btn" class="primary">Download &amp; Build Dry-Run Plan</button>
+      <span class="tip" tabindex="0" data-tip="Map CATMAID internal nodes to CAVE and generate a read-only dry-run table of proposed splits and merges.">i</span>
     </div>
     <p id="cm-status" class="hint"></p>
     <div id="cm-err" role="alert"></div>
@@ -666,23 +815,66 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
   <div id="cm-results" class="hide">
     <div class="metrics" id="cm-metrics"></div>
 
-    <h2>Planned Splits (CAVE roots overlapping &gt;1 CATMAID skeleton)</h2>
+    <h2>Planned Splits (CAVE roots overlapping &gt;1 CATMAID skeleton) <span class="tip" tabindex="0" data-tip="False merges in CAVE where two or more distinct CATMAID neurons occupy the same CAVE segment.">i</span></h2>
     <div class="card scroll"><table id="cm-splits-tbl"></table></div>
 
-    <h2>Planned Merges (CATMAID skeletons spanning &gt;1 CAVE root)</h2>
+    <h2>Planned Merges (CATMAID skeletons spanning &gt;1 CAVE root) <span class="tip" tabindex="0" data-tip="False splits in CAVE where a single continuous CATMAID neuron crosses multiple CAVE segments.">i</span></h2>
     <div class="card scroll"><table id="cm-merges-tbl"></table></div>
 
     <div style="margin-top:16px;display:flex;gap:12px;align-items:center">
       <button type="button" id="cm-exec-btn" class="danger">Execute Approved Splits &amp; Merges in CAVE</button>
+      <span class="tip" tabindex="0" data-tip="Apply only the checked rows in CAVE: splits execute first, root IDs refresh, then merges execute.">i</span>
       <span class="hint" style="margin:0">Executes all checked splits first, refreshes roots, then executes checked merges.</span>
     </div>
 
     <div id="cm-audit-wrap" class="hide">
-      <h2>Execution Audit Log</h2>
+      <h2>Execution Audit Log <span class="tip" tabindex="0" data-tip="Record of every CAVE edit executed, including operation IDs needed if you ever want to undo a change.">i</span></h2>
       <div class="card scroll"><table id="cm-audit-tbl"></table></div>
     </div>
   </div>
+
+  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segments, subtract already-traced manual CATMAID branches, and graft missing backbones/arbors into CATMAID.">i</span></h2>
+  <div class="card pad">
+    <div class="fields">
+      <label><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
+        <textarea id="exp-roots" rows="2" style="width:300px" placeholder="720575940612345678, 720575940687654321"></textarea>
+      </label>
+      <label><span class="lbl-row">CATMAID Search Annotations <span class="tip" tabindex="0" data-tip="Existing CATMAID annotations (e.g., KC right, i1_fragments) to check for overlapping manual tracings. Leave blank to search the 3D bounding box.">i</span></span>
+        <input id="exp-search-ann" style="width:225px" placeholder="e.g. KC right, i1_fragments">
+      </label>
+      <label><span class="lbl-row">Cut Buffer (nm) <span class="tip" tabindex="0" data-tip="Exclusion radius (nm) around existing manual CATMAID nodes. CAVE nodes inside this radius are cut away so manual tracings and synapses are never duplicated.">i</span></span>
+        <input id="exp-buffer" type="number" min="50" value="400" style="width:95px">
+      </label>
+      <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (CATMAID interpolates intermediate slices), while preserving every branch point, tip, and bend.">i</span></span>
+        <input id="exp-slice-step" type="number" min="1" max="20" value="4" style="width:85px">
+      </label>
+      <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC right, KC mature) applied to all updated and newly exported skeletons.">i</span></span>
+        <input id="exp-target-ann" style="width:220px" placeholder="e.g. KC right, KC mature">
+      </label>
+      <label class="check"><input id="exp-stitch" type="checkbox" checked> Auto-stitch into Master <span class="tip" tabindex="0" data-tip="Join exported missing subtrees (and bridged fragments) directly onto the paired Master CATMAID skeleton so manual synapses stay unified.">i</span></label>
+      <button type="button" id="exp-plan-btn" class="primary">Build Export Dry-Run Plan</button>
+      <span class="tip" tabindex="0" data-tip="Preview pairing, node counts after cutting/decimation, and split fragment names (neuronX_1, neuronX_2, neuronX_3...) before uploading anything to CATMAID.">i</span>
+    </div>
+    <p class="hint">Pairs CAVE segments with manual CATMAID nodes, cuts overlapping regions, places nodes every N Z-slices, names 3+ split fragments as neuronX_1, neuronX_2, neuronX_3..., and tags imported nodes with "cave_imported".</p>
+    <p id="exp-status" class="hint"></p>
+    <div id="exp-err" role="alert"></div>
+  </div>
+
+  <div id="exp-results" class="hide">
+    <h2>Export Dry-Run Plan <span class="tip" tabindex="0" data-tip="Review how each CAVE segment matched existing CATMAID skeletons and which missing branches will be uploaded.">i</span></h2>
+    <div class="card scroll"><table id="exp-tbl"></table></div>
+    <div style="margin-top:16px;display:flex;gap:12px;align-items:center">
+      <button type="button" id="exp-exec-btn" class="primary">Export Approved Skeletons to CATMAID</button>
+      <span class="tip" tabindex="0" data-tip="Upload approved non-overlapping fragments to CATMAID, tag them 'cave_imported', stitch if enabled, and apply Target CATMAID Annotations.">i</span>
+      <span class="hint" style="margin:0">Uploads only non-overlapping missing branches and applies Target CATMAID Annotations.</span>
+    </div>
+    <div id="exp-audit-wrap" class="hide">
+      <h2>CATMAID Export Log <span class="tip" tabindex="0" data-tip="Summary of resulting CATMAID skeleton IDs, uploaded node counts, and applied annotations.">i</span></h2>
+      <div class="card scroll"><table id="exp-audit-tbl"></table></div>
+    </div>
+  </div>
 </section>
+<div id="tooltip" role="tooltip"></div>
 
 <script>
 const T=new URLSearchParams(location.search).get('token'),$=i=>document.getElementById(i);$('help').href='help?token='+encodeURIComponent(T);
@@ -694,6 +886,26 @@ const CLS={preview_passed:'good',split:'good',preview_failed:'bad',failed:'bad',
 const el=(t,txt,c)=>{const e=document.createElement(t);if(txt!=null)e.textContent=txt;if(c)e.className=c;return e};
 const safe=f=>async()=>{try{$('err').textContent='';await f();await draw()}catch(e){$('err').textContent=e.message}};
 const btn=(txt,fn,c)=>{const b=el('button',txt,c);b.onclick=safe(fn);return b};
+
+const tipBox=$('tooltip');let pinnedTip=null;
+function showTip(target){
+  const txt=target&&target.dataset?target.dataset.tip:'';
+  if(!txt){tipBox.classList.remove('show');return}
+  tipBox.textContent=txt;tipBox.classList.add('show');
+  const r=target.getBoundingClientRect(),tr=tipBox.getBoundingClientRect();
+  let left=r.left+r.width/2-tr.width/2;
+  left=Math.max(10,Math.min(window.innerWidth-tr.width-10,left));
+  let top=r.top-tr.height-8;
+  if(top<10)top=r.bottom+8;
+  tipBox.style.left=left+'px';tipBox.style.top=top+'px';
+}
+function hideTip(){pinnedTip=null;tipBox.classList.remove('show')}
+document.addEventListener('mouseover',e=>{const t=e.target.closest('.tip');if(t)showTip(t)});
+document.addEventListener('mouseout',e=>{const t=e.target.closest('.tip');if(t&&t!==pinnedTip)tipBox.classList.remove('show')});
+document.addEventListener('focusin',e=>{const t=e.target.closest('.tip');if(t)showTip(t)});
+document.addEventListener('focusout',e=>{if(e.target.closest('.tip'))hideTip()});
+document.addEventListener('click',e=>{const t=e.target.closest('.tip');if(t){e.preventDefault();e.stopPropagation();pinnedTip=t;showTip(t)}else if(pinnedTip){hideTip()}});
+
 function copyText(text,b){const done=()=>{b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1500)};
  if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text).then(done,()=>fallback());fallback();
  function fallback(){const a=el('textarea');a.value=text;a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();
@@ -724,7 +936,6 @@ $('f').onsubmit=e=>{e.preventDefault();safe(async()=>{const root=$('root').value
  await api('/api/start',{sample:$('sample').value,root,preview,rounds});$('root').value=''})()};
 draw().catch(e=>$('err').textContent=e.message);setInterval(()=>draw().catch(e=>$('err').textContent='Lost contact with the server: '+e.message),3000);
 
-/* Tab switching and CATMAID-driven proofreading logic */
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
@@ -732,7 +943,9 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
 });
 
 let cmCache=null,cmSplits=[],cmMerges=[],cmRenderedKey='',cmConfiguredSet=new Set();
+let expPlan=[],expRenderedKey='';
 const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('cm-err').textContent=e.message}};
+const expSafe=f=>async()=>{try{$('exp-err').textContent='';await f()}catch(e){$('exp-err').textContent=e.message}};
 
 function fillProjectForm(name,d){
   const projects=d.projects||{},samples=d.sample_datastacks||{},defaultSrv=d.default_server||'';
@@ -820,6 +1033,39 @@ function renderCatmaidTables(d){
   }else{$('cm-audit-wrap').classList.add('hide')}
 }
 
+function renderExportTables(d){
+  const key=JSON.stringify([d.export_status,(d.export_plan||[]).length,(d.export_audit||[]).length]);
+  if(key===expRenderedKey)return;
+  expRenderedKey=key;
+  if(!d.export_plan||!d.export_plan.length){$('exp-results').classList.add('hide');return}
+  $('exp-results').classList.remove('hide');
+  expPlan=d.export_plan.map(x=>({...x}));
+
+  const et=$('exp-tbl'),eh=el('tr');
+  ['Approve','CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Split Fragment Name(s)'].forEach(x=>eh.append(el('th',x)));
+  et.replaceChildren(eh);
+  expPlan.forEach((row,idx)=>{
+    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;cb.onchange=()=>expPlan[idx].approve=cb.checked;
+    const tdCb=el('td');tdCb.append(cb);
+    r.append(tdCb,el('td',row.cave_root_id,'id'),el('td',row.match_type),el('td',row.paired_skids,'id'),
+             el('td',`${row.kept_nodes} / ${row.total_nodes}`),el('td',row.fragment_names,'msg'));
+    et.append(r);
+  });
+
+  if(d.export_audit&&d.export_audit.length){
+    $('exp-audit-wrap').classList.remove('hide');
+    const at=$('exp-audit-tbl'),ah=el('tr');
+    ['CAVE Root ID','Status','Resulting CATMAID SKID(s)','Fragment Names','Nodes Added','Annotations','Details'].forEach(x=>ah.append(el('th',x)));
+    at.replaceChildren(ah);
+    d.export_audit.forEach(a=>{
+      const r=el('tr');
+      r.append(el('td',a.cave_root_id,'id'),el('td',a.status),el('td',a.resulting_skids,'id'),
+               el('td',a.fragment_names,'msg'),el('td',String(a.nodes_added)),el('td',a.annotations,'msg'),el('td',a.details,'msg'));
+      at.append(r);
+    });
+  }else{$('exp-audit-wrap').classList.add('hide')}
+}
+
 async function drawCatmaid(){
   const d=await api('/api/catmaid/state');cmCache=d;
   const sel=$('cm-proj');
@@ -835,7 +1081,11 @@ async function drawCatmaid(){
   $('cm-status').textContent=d.progress||d.message||'';
   $('cm-plan-btn').disabled=(d.status==='loading'||d.status==='executing');
   $('cm-exec-btn').disabled=(d.status==='loading'||d.status==='executing');
+  $('exp-status').textContent=d.export_progress||d.export_message||'';
+  $('exp-plan-btn').disabled=(d.export_status==='loading'||d.export_status==='executing');
+  $('exp-exec-btn').disabled=(d.export_status==='loading'||d.export_status==='executing');
   renderCatmaidTables(d);
+  renderExportTables(d);
 }
 
 $('cm-proj').onchange=()=>{if(cmCache){$('cm-setup-box').classList.add('hide');fillProjectForm($('cm-proj').value,cmCache)}};
@@ -897,6 +1147,30 @@ $('cm-exec-btn').onclick=cmSafe(async()=>{
   const nS=cmSplits.filter(x=>x.approve).length,nM=cmMerges.filter(x=>x.approve).length;
   if(!confirm(`Execute ${nS} split(s) and ${nM} merge(s) in CAVE? Real chunkedgraph edits will be made.`))return;
   await api('/api/catmaid/execute',{splits:cmSplits,merges:cmMerges});
+  await drawCatmaid();
+});
+
+$('exp-plan-btn').onclick=expSafe(async()=>{
+  const proj=$('cm-proj').value;
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
+  await api('/api/catmaid/export_plan',{
+    project_name:proj,
+    cave_roots:$('exp-roots').value,
+    search_annotations:$('exp-search-ann').value,
+    cut_buffer_nm:+$('exp-buffer').value||400,
+    slice_step:+$('exp-slice-step').value||4
+  });
+  await drawCatmaid();
+});
+
+$('exp-exec-btn').onclick=expSafe(async()=>{
+  const nE=expPlan.filter(x=>x.approve).length;
+  if(!confirm(`Upload approved CAVE skeleton fragments for ${nE} segment(s) into CATMAID?`))return;
+  await api('/api/catmaid/export_execute',{
+    plan:expPlan,
+    target_annotations:$('exp-target-ann').value,
+    auto_stitch:$('exp-stitch').checked
+  });
   await drawCatmaid();
 });
 
