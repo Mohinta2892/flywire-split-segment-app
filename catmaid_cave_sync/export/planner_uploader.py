@@ -1,4 +1,6 @@
 """Build CAVE -> CATMAID export dry-run plans and execute uploads/stitching in CATMAID."""
+import inspect
+
 import navis
 import numpy as np
 import pandas as pd
@@ -18,7 +20,7 @@ from .catmaid_matcher import (
     split_kept_into_subtrees,
 )
 from .retry import retry_call
-from .skeletonizer import _report, skeletonize_cave_roots_kimimaro
+from .skeletonizer import _make_clean_tree_neuron, _report, skeletonize_cave_roots_skeletor
 
 
 def _filter_nodes_near_cave_skeletons(
@@ -77,14 +79,14 @@ def build_cave_export_plan(
     base_neuron_name: str = "",
     search_annotations: str = "",
     cut_buffer_nm: float = 400.0,
-    slice_step: int = 4,
-    mip: int = 3,
-    resample_to_nm: float = 128.0,
-    parallel: int = 4,
+    slice_step: int = 1,
+    skeletor_method: str = "wavefront",
+    min_twig_nm: float = 500.0,
+    resample_to_nm: float = 160.0,
     min_fragment_nodes: int = 3,
     progress_callback=None,
 ) -> tuple[list[dict], dict]:
-    """Skeletonize CAVE roots, pair with existing CATMAID nodes, cut overlapping branches & decimate."""
+    """Skeletonize CAVE roots via skeletor, pair with existing CATMAID nodes, cut overlapping branches & decimate."""
     raw_unique = list(dict.fromkeys(int(r) for r in cave_root_ids))
     scale = (
         np.asarray(catmaid_resolution_nm, dtype=np.float64)
@@ -111,14 +113,14 @@ def build_cave_export_plan(
         if rid not in latest_roots:
             latest_roots.append(rid)
 
-    cave_skeletons = skeletonize_cave_roots_kimimaro(
+    cave_skeletons = skeletonize_cave_roots_skeletor(
         cave_client=cave_client,
         root_ids=latest_roots,
         catmaid_resolution_nm=catmaid_resolution_nm,
         catmaid_coord_unit=catmaid_coord_unit,
-        mip=mip,
+        skeletor_method=skeletor_method,
+        min_twig_nm=min_twig_nm,
         resample_to_nm=resample_to_nm,
-        parallel=parallel,
         progress_callback=progress_callback,
         pct_range=(8.0, 62.0),
     )
@@ -147,6 +149,7 @@ def build_cave_export_plan(
         progress_callback=progress_callback,
     )
 
+    min_match_nodes = max(2, int(min_fragment_nodes))
     root_to_skids: dict[int, list[tuple[int, int]]] = {}
     if not internal_df.empty:
         near_df = _filter_nodes_near_cave_skeletons(
@@ -174,9 +177,11 @@ def build_cave_export_plan(
                 progress_callback=progress_callback,
             )
             for (r_id, skid), grp in mapped_cm.groupby(["root_id", "skeleton_id"]):
-                root_to_skids.setdefault(int(r_id), []).append((int(skid), int(len(grp))))
+                n_overlap = int(len(grp))
+                if n_overlap >= min_match_nodes:
+                    root_to_skids.setdefault(int(r_id), []).append((int(skid), n_overlap))
 
-    _report(progress_callback, "Subtracting overlapping branches & decimating subtrees...", 92.0)
+    _report(progress_callback, "Subtracting overlapping branches & formatting subtrees...", 92.0)
 
     user_base = (base_neuron_name or "").strip()
     plan_rows = []
@@ -197,10 +202,12 @@ def build_cave_export_plan(
         else:
             master_skid = matched_skids[0]
             match_type = "1-to-1 Match" if len(matched_skids) == 1 else f"1-to-Many ({len(matched_skids)} SKIDs)"
-            combined_existing = pd.concat(
-                [trees_by_skid[s]["existing_nodes"] for s in matched_skids],
-                ignore_index=True,
-            )
+            existing_chunks = []
+            for s in matched_skids:
+                df_s = trees_by_skid[s]["existing_nodes"].copy()
+                df_s["skeleton_id"] = int(s)
+                existing_chunks.append(df_s)
+            combined_existing = pd.concat(existing_chunks, ignore_index=True)
             min_dists = point_to_segments_min_dist(
                 cave_pts_nm,
                 combined_existing,
@@ -238,9 +245,10 @@ def build_cave_export_plan(
                 m_pts_nm = combined_existing[["x_nm", "y_nm", "z_nm"]].to_numpy(dtype=np.float64)
                 dmat = cdist(sub_pts_nm, m_pts_nm)
                 sub_i, man_j = np.unravel_index(np.argmin(dmat), dmat.shape)
+                nearest_skid = int(combined_existing.iloc[man_j]["skeleton_id"])
                 anchor_info = {
                     "sub_local_node_id": int(sub_df.iloc[sub_i]["node_id"]),
-                    "master_skid": int(master_skid),
+                    "master_skid": nearest_skid,
                     "anchor_dist_nm": float(dmat[sub_i, man_j]),
                 }
 
@@ -316,19 +324,8 @@ def _join_catmaid_skeletons(
     child_nid = int(c_nodes.iloc[ci]["node_id"])
 
     with _no_pymaid_cache(rm):
-        if hasattr(pymaid, "join_skeletons"):
-            retry_call(
-                lambda: pymaid.join_skeletons(
-                    int(child_skid),
-                    int(master_skid),
-                    from_node=child_nid,
-                    to_node=master_nid,
-                    remote_instance=rm,
-                ),
-                stage="CATMAID join_skeletons",
-            )
-        else:
-            url = rm.make_url(rm.project_id, "skeleton", "join")
+        url = rm.make_url(rm.project_id, "skeleton", "join")
+        try:
             retry_call(
                 lambda: rm.fetch(
                     url,
@@ -340,6 +337,17 @@ def _join_catmaid_skeletons(
                     },
                 ),
                 stage="CATMAID skeleton/join",
+            )
+        except Exception as rest_exc:
+            if not hasattr(pymaid, "join_skeletons"):
+                raise
+            sig = inspect.signature(pymaid.join_skeletons)
+            kw = {"remote_instance": rm}
+            if "winner" in sig.parameters:
+                kw["winner"] = int(master_skid)
+            retry_call(
+                lambda: pymaid.join_skeletons([int(master_skid), int(child_skid)], **kw),
+                stage=f"CATMAID join_skeletons (after {rest_exc})",
             )
     return min_dist
 
@@ -353,7 +361,7 @@ def execute_cave_export_plan(
     max_stitch_dist_nm: float = 2000.0,
     progress_callback=None,
 ) -> list[dict]:
-    """Upload approved non-overlapping CAVE fragments to CATMAID without node tags, stitch & annotate."""
+    """Upload approved non-overlapping CAVE fragments to CATMAID without node tags, optionally stitch & annotate."""
     ann_list = [a.strip() for a in target_annotations.split(",") if a.strip()]
     approved = [r for r in plan_rows if r.get("approve")]
     items = export_bundle.get("items", {})
@@ -379,7 +387,7 @@ def execute_cave_export_plan(
             _report(progress_callback, f"[{idx}/{len(approved)}] Uploading CAVE root {rid_str} to CATMAID...", base_pct)
 
             edited_names = [x.strip() for x in str(row.get("fragment_names") or "").split(",") if x.strip()]
-            master_skid = item["master_skid"]
+            stitched_skids = []
             created_skids = []
             created_names = []
             nodes_added = 0
@@ -394,8 +402,7 @@ def execute_cave_export_plan(
                         else (edited_names[0] if len(edited_names) == 1 and len(item["fragments"]) == 1 else frag["name"])
                     )
                     sub_df = frag["nodes_df"]
-                    nrn = navis.TreeNeuron(sub_df)
-                    nrn.name = frag_name
+                    nrn = _make_clean_tree_neuron(sub_df, rid=0, name=frag_name)
 
                     _report(
                         progress_callback,
@@ -417,48 +424,51 @@ def execute_cave_export_plan(
                     nodes_added += len(sub_df)
 
                     anchor = frag.get("anchor")
-                    if auto_stitch and master_skid is not None and anchor is not None:
-                        _report(
-                            progress_callback,
-                            f"[{idx}/{len(approved)}] Stitching {frag_name} into SKID {master_skid}...",
-                            base_pct + ((f_idx + 0.5) / n_frags) * 0.7 * span_pct,
-                        )
-                        try:
-                            dist_nm = _join_catmaid_skeletons(
-                                rm,
-                                master_skid=int(master_skid),
-                                child_skid=int(new_skid),
-                                scale=scale,
-                                max_stitch_dist_nm=max_stitch_dist_nm,
-                            )
-                            notes.append(f"Stitched {frag_name} into SKID {master_skid} ({dist_nm:.0f} nm)")
-                        except Exception as join_exc:
+                    target_skid = (
+                        int(anchor["master_skid"])
+                        if anchor and anchor.get("master_skid") is not None
+                        else item["master_skid"]
+                    )
+                    anchor_dist = (
+                        float(anchor["anchor_dist_nm"])
+                        if anchor and anchor.get("anchor_dist_nm") is not None
+                        else None
+                    )
+
+                    if auto_stitch and target_skid is not None and anchor_dist is not None:
+                        if anchor_dist > float(max_stitch_dist_nm):
                             created_skids.append(new_skid)
                             created_names.append(frag_name)
-                            notes.append(f"Kept {frag_name} (SKID {new_skid}) separate: {join_exc}")
+                            notes.append(
+                                f"Kept {frag_name} (SKID {new_skid}) separate ({anchor_dist:.0f} nm from SKID {target_skid})"
+                            )
+                        else:
+                            _report(
+                                progress_callback,
+                                f"[{idx}/{len(approved)}] Stitching {frag_name} into SKID {target_skid}...",
+                                base_pct + ((f_idx + 0.5) / n_frags) * 0.7 * span_pct,
+                            )
+                            try:
+                                dist_nm = _join_catmaid_skeletons(
+                                    rm,
+                                    master_skid=int(target_skid),
+                                    child_skid=int(new_skid),
+                                    scale=scale,
+                                    max_stitch_dist_nm=max_stitch_dist_nm,
+                                )
+                                stitched_skids.append(int(target_skid))
+                                notes.append(f"Stitched {frag_name} into SKID {target_skid} ({dist_nm:.0f} nm)")
+                            except Exception as join_exc:
+                                created_skids.append(new_skid)
+                                created_names.append(frag_name)
+                                notes.append(f"Kept {frag_name} (SKID {new_skid}) separate: {join_exc}")
                     else:
                         created_skids.append(new_skid)
                         created_names.append(frag_name)
 
-                if auto_stitch and master_skid is not None and len(item["paired_skids"]) > 1:
-                    for sec_skid in item["paired_skids"][1:]:
-                        try:
-                            dist_nm = _join_catmaid_skeletons(
-                                rm,
-                                master_skid=int(master_skid),
-                                child_skid=int(sec_skid),
-                                scale=scale,
-                                max_stitch_dist_nm=max_stitch_dist_nm,
-                            )
-                            notes.append(f"Bridged SKID {sec_skid} into Master SKID {master_skid} ({dist_nm:.0f} nm)")
-                        except Exception as exc:
-                            notes.append(f"Could not bridge SKID {sec_skid}: {exc}")
-
-                final_skids = []
-                if master_skid is not None:
-                    final_skids.append(int(master_skid))
-                final_skids.extend(created_skids)
-                final_skids = list(dict.fromkeys(final_skids))
+                final_skids = list(dict.fromkeys([*stitched_skids, *created_skids]))
+                if not final_skids and item["master_skid"] is not None:
+                    final_skids = [int(item["master_skid"])]
 
                 if ann_list and final_skids:
                     _report(
@@ -485,7 +495,7 @@ def execute_cave_export_plan(
                 audit.append({
                     "cave_root_id": rid_str,
                     "status": "FAILED",
-                    "resulting_skids": ",".join(map(str, created_skids)),
+                    "resulting_skids": ",".join(map(str, [*stitched_skids, *created_skids])),
                     "fragment_names": ", ".join(created_names),
                     "nodes_added": nodes_added,
                     "annotations": "",

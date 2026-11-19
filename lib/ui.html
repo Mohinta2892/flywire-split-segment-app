@@ -146,7 +146,7 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
     </div>
   </div>
 
-  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segments via multi-CPU Kimimaro TEASAR, subtract already-traced CATMAID branches in the local neuron neighborhood, and upload missing backbones/arbors into CATMAID.">i</span></h2>
+  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segment meshes via skeletor + navis, subtract already-traced CATMAID branches in the local neuron neighborhood, and upload missing backbones/arbors into CATMAID.">i</span></h2>
   <div class="card pad">
     <div class="fields">
       <label><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
@@ -155,14 +155,18 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
       <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch (e.g., 'KC' gives every neuron the name 'KC', which CATMAID displays as 'KC <id> (KC1) [RIGHT]' when annotated; use 'KC {n}' if you also want sequential numbers in the name).">i</span></span>
         <input id="exp-name" style="width:165px" placeholder="e.g. KC">
       </label>
-      <label><span class="lbl-row">Kimimaro MIP <span class="tip" tabindex="0" data-tip="Downsampling MIP level fed to Kimimaro TEASAR (3 = higher detail, 4 = faster; automatic coordinate scaling is derived from the CAVE stack resolution at this MIP).">i</span></span>
-        <select id="exp-mip" style="width:80px"><option value="3">3</option><option value="4" selected>4</option><option value="2">2</option></select>
+      <label><span class="lbl-row">Skeletor Method <span class="tip" tabindex="0" data-tip="Mesh skeletonization method: Wavefront (fast, smooth centerlines), Wavefront Exact (uniform step size), or TEASAR (mesh-based geodesic skeletonization).">i</span></span>
+        <select id="exp-method" style="width:145px">
+          <option value="wavefront" selected>Wavefront</option>
+          <option value="wavefront_exact">Wavefront Exact</option>
+          <option value="teasar">TEASAR (Mesh)</option>
+        </select>
       </label>
-      <label><span class="lbl-row">Parallel CPUs <span class="tip" tabindex="0" data-tip="Number of parallel CPU workers for Kimimaro TEASAR skeletonization.">i</span></span>
-        <select id="exp-parallel" style="width:80px"><option value="1">1</option><option value="2">2</option><option value="4">4</option><option value="8" selected>8</option></select>
+      <label><span class="lbl-row">Resample (nm) <span class="tip" tabindex="0" data-tip="Target inter-node spacing (nm) after mesh skeletonization, bounded healing, and smoothing (default 160 nm).">i</span></span>
+        <input id="exp-resample" type="number" min="16" value="160" style="width:85px">
       </label>
-      <label><span class="lbl-row">Resample (nm) <span class="tip" tabindex="0" data-tip="Target inter-node spacing (nm) after Kimimaro TEASAR healing and smoothing (default 240 nm).">i</span></span>
-        <input id="exp-resample" type="number" min="16" value="240" style="width:85px">
+      <label><span class="lbl-row">Twig Prune (nm) <span class="tip" tabindex="0" data-tip="Prune minor surface hairs shorter than this length (nm) or shorter than 1.1x the local neurite diameter (default 500 nm; 0 = off).">i</span></span>
+        <input id="exp-twig" type="number" min="0" value="500" style="width:85px">
       </label>
       <label><span class="lbl-row">CATMAID Search Annotations <span class="tip" tabindex="0" data-tip="Optional: restrict overlap checks to skeletons with these CATMAID annotations. Leave blank to automatically check only the tight 3D path around the CAVE neuron.">i</span></span>
         <input id="exp-search-ann" style="width:200px" placeholder="Optional (blank = local path)">
@@ -170,7 +174,7 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
       <label><span class="lbl-row">Cut Buffer (nm) <span class="tip" tabindex="0" data-tip="Exclusion radius (nm) around existing CATMAID nodes. CAVE nodes inside this radius are cut away so manual tracings and synapses are never duplicated.">i</span></span>
         <input id="exp-buffer" type="number" min="50" value="400" style="width:85px">
       </label>
-      <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (1 = keep exact Kimimaro resampled spacing).">i</span></span>
+      <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (1 = keep exact resampled spacing).">i</span></span>
         <input id="exp-slice-step" type="number" min="1" max="20" value="1" style="width:75px">
       </label>
       <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC, KC1, RIGHT) applied to all neurons in the batch. CATMAID's Neuron Name Service renders these as (KC1) [RIGHT].">i</span></span>
@@ -178,9 +182,9 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
       </label>
       <label class="check"><input id="exp-stitch" type="checkbox"> Auto-stitch into Master <span class="tip" tabindex="0" data-tip="Optional (off by default): automatically join exported missing subtrees onto the paired CATMAID skeleton. Leave unchecked to review and merge manually in CATMAID.">i</span></label>
       <button type="button" id="exp-plan-btn" class="primary">Build Export Dry-Run Plan</button>
-      <span class="tip" tabindex="0" data-tip="Run Kimimaro skeletonization, preview pairing, node counts, and editable neuron names before uploading anything to CATMAID.">i</span>
+      <span class="tip" tabindex="0" data-tip="Run mesh skeletonization, preview pairing, node counts, and editable neuron names before uploading anything to CATMAID.">i</span>
     </div>
-    <p class="hint">Uses ZlaticLab's <b>Kimimaro TEASAR + navis</b> pipeline (heal &rarr; smooth &rarr; resample). Set <b>Z-Slice Step = 1</b> to keep raw resampled spacing.</p>
+    <p class="hint">Uses <b>skeletor + navis</b> (mesh cleanup &rarr; skeletonize &rarr; bounded heal &rarr; smooth &rarr; resample). Set <b>Z-Slice Step = 1</b> to keep exact resampled spacing.</p>
     <div id="exp-prog-wrap" class="pbar-wrap hide">
       <div class="pbar-head">
         <span id="exp-status" class="msg"></span>
@@ -689,9 +693,9 @@ $('exp-plan-btn').onclick=expSafe(async()=>{
     project_name:proj,
     cave_roots:$('exp-roots').value,
     base_neuron_name:$('exp-name').value,
-    mip:+$('exp-mip').value,
-    parallel:+$('exp-parallel').value||8,
-    resample_to_nm:+$('exp-resample').value||240,
+    skeletor_method:$('exp-method').value||'wavefront',
+    min_twig_nm:$('exp-twig').value===''?500:+$('exp-twig').value,
+    resample_to_nm:+$('exp-resample').value||160,
     search_annotations:$('exp-search-ann').value,
     cut_buffer_nm:+$('exp-buffer').value||400,
     slice_step:+$('exp-slice-step').value||1
