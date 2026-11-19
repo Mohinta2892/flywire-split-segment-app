@@ -35,9 +35,9 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <body>
 <main>
 <h1>How to use the segment splitter</h1>
-<p class="lead">Proofread CAVE segmentations either by cutting large, wrongly merged segments into smaller pieces (<strong>Length-Based Auto Split</strong>) or by driving batch splits and merges from traced CATMAID skeletons (<strong>CATMAID-Driven Split &amp; Merge</strong>).</p>
+<p class="lead">Proofread CAVE segmentations by cutting large false merges (<strong>Length-Based Auto Split</strong>), running bidirectional proofreading and skeleton export between CATMAID and CAVE (<strong>CATMAID-Driven Split &amp; Merge</strong>), and auditing every edit in the <strong>Change Register</strong>.</p>
 
-<div class="warn"><strong>Every split or merge is a real, permanent edit</strong> to the segmentation that everyone works on. Always check previews or dry-run plans before executing edits.</div>
+<div class="warn"><strong>Every split, merge, or CATMAID upload is a real, permanent edit</strong> to the shared segmentation or skeleton database. Always check previews or dry-run plans before executing edits.</div>
 
 <nav class="toc"><strong>Contents</strong>
 <ol>
@@ -46,20 +46,23 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <li><a href="#rounds">Tab 1: Cut into more pieces with rounds</a></li>
 <li><a href="#progress">Tab 1: Follow the progress</a></li>
 <li><a href="#catmaid-setup">Tab 2: CATMAID-Driven Split &amp; Merge — First-time setup</a></li>
-<li><a href="#catmaid-batch">Tab 2: Preview and execute a CATMAID batch</a></li>
+<li><a href="#catmaid-batch">Tab 2: Preview and execute a CATMAID batch (CATMAID &rarr; CAVE)</a></li>
+<li><a href="#cave-export">Tab 2: Export CAVE skeletons to CATMAID (CAVE &rarr; CATMAID)</a></li>
+<li><a href="#changelog">Tab 3: Change Register (CAVE &amp; CATMAID)</a></li>
+<li><a href="#deploy">Deployment &amp; configuration examples</a></li>
 <li><a href="#problems">When something goes wrong</a></li>
 <li><a href="#know">Good to know</a></li>
 </ol></nav>
 
 <h2 id="open">1. Open the app</h2>
-<p>The app runs on the lab's GPU server. Whoever starts it gets a link that looks like this:</p>
-<pre><code>http://127.0.0.1:8080/?token=y8F6Vic…</code></pre>
-<p>To open it from your own computer, first connect to the server with a tunnel, then open the link in your browser:</p>
-<pre><code>ssh -L 8080:localhost:8080 &lt;server&gt;</code></pre>
+<p>The app runs on the lab's GPU server (or locally on your workstation). Whoever starts it gets a link that looks like this:</p>
+<pre><code>http://127.0.0.1:8765/?token=y8F6Vic…</code></pre>
+<p>To open it from your own computer when it runs on a remote server, first connect with an SSH tunnel, then open the link in your browser:</p>
+<pre><code>ssh -N -L 8765:127.0.0.1:8765 &lt;server&gt;</code></pre>
 <ul>
-<li><strong>The token in the link is a password.</strong> Anyone with the link can make edits with the server's CAVE account, so don't share it or paste it in chat.</li>
+<li><strong>The token in the link is a password.</strong> Anyone with the link can make edits with the server's CAVE and CATMAID accounts, so don't share it or paste it in chat.</li>
 <li><strong>The link changes every time the app restarts.</strong> If the page says "Missing or wrong token", copy the new link printed in the terminal.</li>
-<li>Switch between <strong>Length-Based Auto Split</strong> and <strong>CATMAID-Driven Split &amp; Merge</strong> using the two tabs below the page title.</li>
+<li>Switch between <strong>Length-Based Auto Split</strong>, <strong>CATMAID-Driven Split &amp; Merge</strong>, and <strong>Change Register (CAVE &amp; CATMAID)</strong> using the three tabs below the page title.</li>
 <li>Click <strong>How to use</strong> at the top right of the app at any time to open this guide.</li>
 </ul>
 
@@ -81,8 +84,8 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <p>Each cut gives two large pieces. With more than one round, the app keeps going and cuts each of those pieces again:</p>
 <table>
 <tr><th>Rounds</th><th>What happens</th><th>Edits at most</th><th>Large pieces</th></tr>
-<tr><td>1</td><td>A → B + C</td><td>1</td><td>2</td></tr>
-<tr><td>2</td><td>then B → B0 + B1 and C → C0 + C1</td><td>3</td><td>4</td></tr>
+<tr><td>1</td><td>A &rarr; B + C</td><td>1</td><td>2</td></tr>
+<tr><td>2</td><td>then B &rarr; B0 + B1 and C &rarr; C0 + C1</td><td>3</td><td>4</td></tr>
 <tr><td>3</td><td>then each of those again</td><td>7</td><td>8</td></tr>
 </table>
 <p>The hint under the form shows these numbers before you start. The maximum is 6 rounds. Every cut in the tree gets its own preview, and a branch stops on its own if its preview fails or a piece is too small (under 10 L2 nodes). The other branches carry on.</p>
@@ -106,19 +109,20 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <p>Every result has a <strong>Copy</strong> button. It copies the sample, segment, status and full message, including the complete server error if there was one. Use it when you report a problem.</p>
 
 <h2 id="catmaid-setup">5. Tab 2: CATMAID-Driven Split &amp; Merge — First-time setup</h2>
-<p>Use the <strong>CATMAID-Driven Split &amp; Merge</strong> tab to compare traced CATMAID skeletons against CAVE segmentations, split false merges where one CAVE segment overlaps multiple CATMAID skeletons, and merge false splits where one CATMAID skeleton spans multiple CAVE segments.</p>
+<p>Use the <strong>CATMAID-Driven Split &amp; Merge</strong> tab to compare traced CATMAID skeletons against CAVE segmentations, split false merges where one CAVE segment overlaps multiple CATMAID skeletons, merge false splits where one CATMAID skeleton spans multiple CAVE segments, and export proofread CAVE segments back into CATMAID.</p>
 <p>Your CAVE login is read automatically from your saved local CAVE secret (<code>CAVEclient().auth</code>), and sample names/datastacks are inherited from <code>config.json</code>. The <strong>first time</strong> you work with a sample (for example, <code>Parker-Goog</code> or <code>Parker_LSD</code>):</p>
 <ol>
 <li>Select the sample in <strong>Sample / Project Profile</strong>. The setup panel opens automatically if the project has not been saved yet.</li>
-<li>Enter your <strong>CATMAID Server URL</strong>, <strong>CATMAID Project ID</strong>, and <strong>CATMAID API Token</strong>.</li>
-<li>Click <strong>1. Connect &amp; Query Resolutions</strong>. The app queries both servers directly to detect the CAVE segmentation resolution (e.g., <code>16,16,16</code> nm) and available CATMAID stack resolutions (e.g., <code>8,8,16</code> nm).</li>
-<li>Confirm the selected CATMAID stack, resolutions, and coordinate unit (<code>nm</code> for standard CATMAID exports), then click <strong>2. Save Project Profile</strong>.</li>
+<li>Enter your base <strong>CATMAID Server URL</strong> (without <code>?pid=...</code>), numeric <strong>CATMAID Project ID</strong>, and your 40-character <strong>CATMAID API Token</strong> (in CATMAID: click your username top-right &rarr; <em>API token</em>).</li>
+<li>If your CATMAID server displays a browser login popup before the page loads (front-door HTTP Basic Auth), also enter your <strong>HTTP User</strong> and <strong>HTTP Password</strong>. Otherwise leave both blank.</li>
+<li>Click <strong>1. Verify Connection &amp; Query</strong>. The app authenticates with both servers and detects the CAVE segmentation resolution (e.g., <code>16,16,16</code> nm) and available CATMAID stacks.</li>
+<li>Confirm or enter the <strong>CATMAID Resolution (x,y,z nm)</strong> (e.g., <code>8,8,16</code>) and coordinate unit (<code>nm</code> for standard CATMAID projects), then click <strong>2. Save Project Profile</strong>.</li>
 </ol>
-<div class="note"><strong>Saved locally:</strong> Your CATMAID token and volume resolutions are stored in <code>.cave_catmaid_config.json</code>. On all subsequent runs, selecting that sample loads everything automatically.</div>
+<div class="note"><strong>Saved locally:</strong> Your CATMAID credentials and volume resolutions are stored in <code>.cave_catmaid_config.json</code>. On all subsequent runs, selecting that sample loads everything automatically.</div>
 
-<h2 id="catmaid-batch">6. Tab 2: Preview and execute a CATMAID batch</h2>
+<h2 id="catmaid-batch">6. Tab 2: Preview and execute a CATMAID batch (CATMAID &rarr; CAVE)</h2>
 <ol>
-<li><strong>Load Skeletons:</strong> choose <strong>CATMAID Annotation</strong> (for example, an annotation covering a batch of 200 neurons) or enter comma-separated <strong>Skeleton IDs</strong>.</li>
+<li><strong>Load Skeletons:</strong> choose <strong>CATMAID Annotation</strong> (for example, an annotation covering a batch of neurons) or enter comma-separated <strong>Skeleton IDs</strong>.</li>
 <li><strong>Min Nodes / Side:</strong> rows where either side has fewer internal nodes than this threshold (default <code>3</code>) are left unchecked in the approval tables so minor boundary jitter does not trigger unwanted edits.</li>
 <li>Click <strong>Download &amp; Build Dry-Run Plan</strong>. The app downloads skeletons locally as SWC files (cached under <code>data/catmaid_skeletons/&lt;project&gt;/</code>), strips out end (leaf) nodes while keeping all remaining manually placed nodes, and maps coordinates to live CAVE root IDs. Tick <strong>Re-download SWCs</strong> if skeletons were updated in CATMAID.</li>
 <li><strong>Review the triage plan:</strong>
@@ -132,11 +136,72 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <li>Click <strong>Execute Approved Splits &amp; Merges in CAVE</strong>. The app executes all checked <strong>splits first</strong>, refreshes live CAVE root IDs, and then executes all checked <strong>merges</strong> using the closest pair of internal skeleton nodes between fragments.</li>
 </ol>
 
-<h2 id="problems">7. When something goes wrong</h2>
+<h2 id="cave-export">7. Tab 2: Export CAVE skeletons to CATMAID (CAVE &rarr; CATMAID)</h2>
+<p>In Section <strong>2. CAVE &rarr; CATMAID</strong>, you can skeletonize proofread CAVE segments using multi-CPU <strong>Kimimaro TEASAR + navis</strong> (heal &rarr; smooth &rarr; resample) and upload missing branches directly into CATMAID without duplicating existing manual tracings:</p>
+<ol>
+<li><strong>CAVE Root IDs:</strong> paste one or more proofread CAVE segment IDs (comma, space, or newline separated).</li>
+<li><strong>Neuron / Batch Name &amp; Target CATMAID Annotations:</strong> enter a base neuron name (e.g., <code>KC</code>) and comma-separated CATMAID annotations (e.g., <code>KC, KC1, RIGHT</code>). CATMAID's Neuron Name Service automatically renders annotations alongside the neuron name.</li>
+<li><strong>Kimimaro MIP, Parallel CPUs &amp; Resample (nm):</strong> choose the downsampling level (<code>3</code> for finer branches, <code>4</code> for faster whole-cell runs), number of parallel CPU workers (default <code>4</code>), and target spacing (default <code>128 nm</code>).</li>
+<li><strong>Cut Buffer (nm) &amp; Z-Slice Step:</strong> any skeleton node within <strong>Cut Buffer</strong> (default <code>400 nm</code>) of an existing CATMAID skeleton in that local neighborhood is cut away so manual backbones and synapses are never overwritten. <strong>Z-Slice Step</strong> (default <code>4</code>) thins smooth unbranched tracts while keeping all branch points and tips.</li>
+<li>Click <strong>Build Export Dry-Run Plan</strong> to inspect match types (<em>0-Match (New)</em>, <em>1-to-1 Match</em>, or <em>1-to-Many</em>), node counts, and editable fragment names.</li>
+<li>Click <strong>Export Approved Skeletons to CATMAID</strong>. With <strong>Auto-stitch into Master</strong> ticked, new branches join directly onto your paired CATMAID skeleton.</li>
+</ol>
+
+<h2 id="changelog">8. Tab 3: Change Register (CAVE &amp; CATMAID)</h2>
+<p>The <strong>Change Register (CAVE &amp; CATMAID)</strong> tab records every real edit applied across both databases so the lab has a single place to see <strong>where</strong> (CAVE or CATMAID) and <strong>what</strong> changed:</p>
+<ul>
+<li><strong>CAVE entries:</strong> logs every <em>Auto Split</em>, <em>CATMAID-Driven Split</em>, and <em>CATMAID-Driven Merge</em> with the project, datastack, before/after root IDs, and chunkedgraph <strong>Op ID</strong>.</li>
+<li><strong>CATMAID entries:</strong> logs every <em>Skeleton Export &amp; Stitch</em> with the source CAVE root ID, resulting CATMAID skeleton ID(s), fragment names, added node count, and applied annotations.</li>
+<li><strong>Filtering &amp; export:</strong> filter by system (<em>All</em>, <em>CAVE Only</em>, or <em>CATMAID Only</em>) or search by root ID, skeleton ID, Op ID, or annotation. Click <strong>Download CSV</strong> at any time; the register is also saved automatically on disk at <code>outputs/change_register.csv</code> and <code>outputs/change_register.json</code>.</li>
+</ul>
+
+<h2 id="deploy">9. Deployment &amp; configuration examples</h2>
+<p>Use these examples when setting up the app on a new workstation or lab server.</p>
+
+<h3>Example A: Fresh installation &amp; CAVE authentication</h3>
+<pre><code>git clone &lt;repo-url&gt;
+cd &lt;repo-folder&gt;
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</code></pre>
+<p>Save your personal CAVE token once so <code>caveclient</code> can authenticate automatically:</p>
+<pre><code>python -c "from caveclient import CAVEclient; c = CAVEclient(server_address='https://global.connectomics.braininbrain.org'); c.auth.save_token(token='YOUR_CAVE_TOKEN', overwrite=True)"</code></pre>
+
+<h3>Example B: Configuring datasets in <code>config.json</code></h3>
+<p>Create or edit <code>config.json</code> in the repository root to map human-friendly sample names to their CAVE datastack names:</p>
+<pre><code>{
+  "server_address": "https://global.connectomics.braininbrain.org",
+  "samples": {
+    "Parker-Goog": "zlatic_parker_goog_datastack",
+    "Parker_LSD": "zlatic_parker_lsd_datastack"
+  }
+}</code></pre>
+<p>Verify the installation and web routes offline (no CAVE edits are made) using the built-in self-test:</p>
+<pre><code>python app.py --selftest</code></pre>
+
+<h3>Example C: Deploying on a multi-core lab server &amp; connecting over SSH</h3>
+<p>Running the server on a multi-core machine speeds up Kimimaro skeletonization and CloudVolume chunk downloads while keeping the port bound strictly to <code>127.0.0.1</code>:</p>
+<pre><code># 1. On the lab server (in tmux/screen or background):
+nohup python app.py --host 127.0.0.1 --port 8765 &gt; server.log 2&gt;&amp;1 &amp;
+head -n 5 server.log   # copy the http://127.0.0.1:8765/?token=... link
+
+# 2. On your laptop, forward port 8765 over SSH:
+ssh -N -L 8765:127.0.0.1:8765 &lt;your_user&gt;@&lt;lab-server&gt;</code></pre>
+<p>Open the copied <code>http://127.0.0.1:8765/?token=...</code> URL in your local browser.</p>
+
+<h3>Example D: End-to-end CATMAID &harr; CAVE workflow</h3>
+<ol>
+<li><strong>Configure project once:</strong> in Tab 2, select <code>Parker-Goog</code>, enter your CATMAID URL (e.g., <code>https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem</code>), project ID, API token (and HTTP Basic Auth user/password if prompted by the server), click <strong>1. Verify Connection &amp; Query</strong>, and click <strong>2. Save Project Profile</strong>.</li>
+<li><strong>Fix CAVE segmentation errors from CATMAID:</strong> enter a CATMAID annotation in Section 1, click <strong>Download &amp; Build Dry-Run Plan</strong>, inspect splits in Neuroglancer via <strong>Preview 3D</strong>, and click <strong>Execute Approved Splits &amp; Merges in CAVE</strong>.</li>
+<li><strong>Push completed CAVE branches back to CATMAID:</strong> paste the resulting CAVE root ID(s) into Section 2, set <strong>Target CATMAID Annotations</strong> (e.g., <code>KC, RIGHT</code>), click <strong>Build Export Dry-Run Plan</strong>, and click <strong>Export Approved Skeletons to CATMAID</strong>.</li>
+<li><strong>Verify the audit trail:</strong> open Tab 3 (<strong>Change Register</strong>) or download <code>outputs/change_register.csv</code> to review all CAVE Op IDs and newly created/stitched CATMAID skeleton IDs.</li>
+</ol>
+
+<h2 id="problems">10. When something goes wrong</h2>
 <h3>Preview failed (Tab 1)</h3>
 <p>Nothing was edited. A preview passes only if the cut is valid, cleanly separates the two sides, misses at most 1% of supervoxels, and the smaller piece has at least 10% of the segment. In the example above, "Would give 1103 / 41 L2" failed because 41 is under 10% of the total: the cut would only have shaved off a small piece. Such segments may need splitting by hand.</p>
 <h3>Failed</h3>
-<p>Nothing was edited. The message explains why: for example, the segment is too small (under 10 L2 nodes), or it is no longer the latest version because someone else edited it. In that case, paste in the newest ID. If it mentions an invalid or expired <strong>CAVE token</strong>, renew it with <code>CAVEclient(...).auth.get_new_token()</code> and <code>auth.save_token(...)</code>. If a CATMAID query fails, open <strong>Edit CATMAID / Resolution Setup</strong> in Tab 2 to verify your CATMAID API token and stack resolution. For server errors you don't understand, press <strong>Copy</strong> and send it to whoever maintains the app.</p>
+<p>Nothing was edited. The message explains why: for example, the segment is too small (under 10 L2 nodes), or it is no longer the latest version because someone else edited it. In that case, paste in the newest ID. If it mentions an invalid or expired <strong>CAVE token</strong>, renew it with <code>CAVEclient(...).auth.get_new_token()</code> and <code>auth.save_token(...)</code>. If a CATMAID query or export fails, open <strong>Edit CATMAID / Resolution Setup</strong> in Tab 2 to verify your CATMAID API token, HTTP Basic Auth credentials, and stack resolution. For server errors you don't understand, press <strong>Copy</strong> and send it to whoever maintains the app.</p>
 <h3>Outcome unknown (Tab 1)</h3>
 <p>The edit may or may not have been applied, for example because the server took too long to answer. The segment is blocked so it can't be edited twice. Wait a few minutes, then click <strong>Re-check</strong>:</p>
 <ul>
@@ -144,14 +209,14 @@ nav.toc ol{margin:4px 0}nav.toc a{color:#2b59c3;text-decoration:none}nav.toc a:h
 <li>If the segment hasn't changed, the status becomes <span class="s bad">Failed</span>, and you can start it again.</li>
 </ul>
 
-<h2 id="know">8. Good to know</h2>
+<h2 id="know">11. Good to know</h2>
 <ul>
-<li><strong>Segment IDs change with every edit.</strong> After a split or merge, the old ID is out of date. Use the new IDs from the result or audit log.</li>
+<li><strong>Segment IDs change with every edit.</strong> After a split or merge, the old ID is out of date. Use the new IDs from the result, audit log, or <strong>Change Register</strong>.</li>
 <li><strong>End nodes excluded in CATMAID mode:</strong> terminal leaf nodes are dropped before comparing with CAVE because manual tips frequently extend slightly past a membrane boundary into a neighboring cell. All branch, soma, and backbone nodes are kept.</li>
 <li><strong>Local SWC caching:</strong> downloaded CATMAID skeletons are cached locally so re-building plans with different node thresholds is fast. Tick <strong>Re-download SWCs</strong> after editing tracings in CATMAID.</li>
 <li><strong>Small fragments (Tab 1):</strong> a cut can leave a few tiny fragments besides the two large pieces. They aren't cut further.</li>
 <li><strong>Continuing a stopped branch (Tab 1):</strong> <strong>Re-check</strong> doesn't resume it. Paste the piece's ID in as a new job.</li>
-<li><strong>Undoing a split or merge:</strong> edits can be undone by whoever maintains the app, using the operation number (<em>Op</em>) shown in the result or recorded in <code>outputs/proofreading_audit_log_&lt;project&gt;.csv</code>. Undo newest first.</li>
+<li><strong>Undoing a split or merge:</strong> CAVE edits can be undone by whoever maintains the app, using the operation number (<em>Op</em>) shown in the result, <code>outputs/proofreading_audit_log_&lt;project&gt;.csv</code>, or the <strong>Change Register</strong>. Undo newest first.</li>
 <li><strong>Stopping:</strong> there is no stop button. Stopping the app on the server stops new work. An edit already in progress still finishes on the CAVE server.</li>
 </ul>
 </main>

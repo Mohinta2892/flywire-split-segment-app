@@ -1,1 +1,1 @@
-"""CATMAID-driven proofreading (splitting and merging) for CAVE segmentations."""
+"""CATMAID <-> CAVE bidirectional proofreading and export package."""

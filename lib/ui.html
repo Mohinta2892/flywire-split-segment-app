@@ -1,0 +1,715 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Segment splitter & CATMAID proofreading</title><style>
+*{box-sizing:border-box}body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#f4f5f7;color:#1c2330}
+main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:28px 0 10px;display:flex;align-items:center;gap:6px}
+.sub,.hint{color:#5b6472}.sub{margin:2px 0 16px}.hint{margin:12px 0 0;font-size:13px}
+.tabs{display:flex;gap:8px;border-bottom:1px solid #d5dae2;margin-bottom:20px;flex-wrap:wrap}
+.tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;height:auto;font-weight:600;color:#5b6472;display:inline-flex;align-items:center;gap:6px}
+.tab:hover{background:transparent;color:#1c2330}.tab.active{color:#2b59c3;border-bottom-color:#2b59c3}
+.badge{display:inline-block;padding:0 7px;border-radius:999px;background:#e6eaf0;color:#3d4654;font-size:11px;font-weight:600}
+.tab.active .badge{background:#dce6fb;color:#2b59c3}
+.panel{display:none}.panel.active{display:block}
+.card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card,div.pad{padding:18px 20px}.scroll{overflow-x:auto}
+.fields{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap}label{display:grid;gap:4px;font-size:12px;font-weight:600;color:#5b6472}
+.lbl-row{display:inline-flex;align-items:center;gap:5px}
+label.check{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:400;color:inherit;height:34px}
+input:not([type=checkbox]),select,textarea{font:inherit;font-weight:400;color:inherit;padding:6px 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff}
+input:not([type=checkbox]),select{height:34px;padding:0 10px}#root{width:220px}#rounds{width:76px}
+button,a.btn{font:inherit;font-weight:500;white-space:nowrap;height:30px;padding:0 12px;border:1px solid #cdd2da;border-radius:6px;background:#fff;color:inherit;cursor:pointer;display:inline-flex;align-items:center;text-decoration:none}button:hover,a.btn:hover{background:#f1f3f5}
+button:disabled{opacity:.55;cursor:not-allowed}
+.primary{height:34px;padding:0 18px;background:#2b59c3;border-color:#2b59c3;color:#fff}.primary:hover:not(:disabled){background:#234aa3}.danger{background:#b3261e;border-color:#b3261e;color:#fff}.danger:hover:not(:disabled){background:#94201a}
+table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;color:#5b6472;background:#fafbfc}th,td{border-bottom:1px solid #eceef1;padding:10px 14px;text-align:left;vertical-align:top}tr:last-child td{border-bottom:0}
+.id{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:nowrap}.round{display:block;font:12px system-ui,sans-serif;color:#5b6472}.msg{color:#3d4654;font-size:13px;overflow-wrap:anywhere}.time{color:#5b6472;font-size:12px;white-space:nowrap}
+.s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}.sys-cave{background:#e3edff;color:#1d4ed8}.sys-cm{background:#ede9fe;color:#5b21b6}
+.copy{height:22px;padding:0 8px;margin-left:8px;font-size:12px;color:#5b6472;vertical-align:baseline}.msg{user-select:text}
+.top{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.helplink{color:#2b59c3;font-weight:500;text-decoration:none}.helplink:hover{text-decoration:underline}
+#err,#cm-err,#exp-err{color:#b3261e;margin-top:10px}#err:empty,#cm-err:empty,#exp-err:empty{display:none}td:first-child{white-space:nowrap}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0}
+.metric{background:#fff;border:1px solid #e1e4e9;border-radius:8px;padding:12px 16px}.metric .v{font-size:20px;font-weight:600;margin-top:2px}
+.box{border:1px solid #d5dae2;border-radius:8px;padding:14px 16px;margin-top:14px;background:#fafbfc}.hide{display:none!important}
+.ngl{display:inline-block;margin-left:8px;color:#2b59c3;font-weight:500;text-decoration:none}.ngl:hover{text-decoration:underline}
+.ok{color:#17663a;font-weight:600}
+.tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid #b8c0cc;color:#5b6472;font:600 10px/1 system-ui,sans-serif;cursor:help;opacity:.35;transition:opacity .15s,border-color .15s,color .15s,background .15s;user-select:none;flex-shrink:0}
+label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opacity:1;border-color:#2b59c3;color:#2b59c3;background:#eef3fd;outline:none}
+#tooltip{position:fixed;z-index:9999;max-width:300px;padding:8px 11px;border-radius:7px;background:#1c2330;color:#fff;font:400 12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 6px 18px #10182838;pointer-events:none;opacity:0;transition:opacity .12s}
+#tooltip.show{opacity:1}
+.cell-in{height:28px!important;padding:0 8px!important;font-size:13px!important;width:220px}
+.pbar-wrap{margin-top:12px}
+.pbar-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;font-size:13px}
+.pbar-meta{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.pbar-track{height:8px;background:#e6eaf0;border-radius:999px;overflow:hidden}
+.pbar-fill{height:100%;width:0%;background:#2b59c3;border-radius:999px;transition:width .35s ease,background-color .2s ease}
+.pbar-fill.done{background:#17663a}
+.pbar-fill.fail{background:#b3261e}
+.rm-btn{height:26px;padding:0 9px;font-size:12px;color:#98211a;border-color:#e5b8b5;background:#fff}
+.rm-btn:hover{background:#fbe2e0;border-color:#b3261e}
+</style></head><body><main>
+<div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split or merge is a real chunkedgraph edit.</p>
+
+<nav class="tabs" role="tablist">
+  <button type="button" class="tab active" data-tab="auto">Length-Based Auto Split <span class="tip" tabindex="0" data-tip="Automatically cut a single large CAVE false-merge segment at its most distant endpoints without needing CATMAID tracings.">i</span></button>
+  <button type="button" class="tab" data-tab="catmaid">CATMAID-Driven Split &amp; Merge <span class="tip" tabindex="0" data-tip="Bidirectional sync: (1) use CATMAID skeletons to split/merge CAVE segments, and (2) export proofread CAVE skeletons back into CATMAID.">i</span></button>
+  <button type="button" class="tab" data-tab="changelog">Change Register (CAVE &amp; CATMAID) <span id="cl-badge" class="badge">0</span> <span class="tip" tabindex="0" data-tip="Persistent register of every real change applied in CAVE (splits/merges) and in CATMAID (exported skeletons, stitches, annotations).">i</span></button>
+</nav>
+
+<section id="panel-auto" class="panel active">
+<form id="f" class="card"><div class="fields">
+  <label><span class="lbl-row">Sample <span class="tip" tabindex="0" data-tip="Target CAVE volume / datastack configured in config.json.">i</span></span><select id="sample"></select></label>
+  <label><span class="lbl-row">Segment <span class="tip" tabindex="0" data-tip="64-bit CAVE segment root_id of the merged object you want to split.">i</span></span><input id="root" required inputmode="numeric" autocomplete="off"></label>
+  <label><span class="lbl-row">Rounds <span class="tip" tabindex="0" data-tip="Number of recursive binary split rounds (1 round = 1 cut into 2 pieces; N rounds = up to 2^N - 1 cuts).">i</span></span><input id="rounds" type="number" min="1" value="1" required></label>
+  <label class="check"><input id="preview" type="checkbox" checked> Preview first <span class="tip" tabindex="0" data-tip="Simulate the min-cut first without editing CAVE. If the preview passes quality checks, the split runs automatically.">i</span></label>
+  <button class="primary">Start</button>
+</div>
+<p id="hint" class="hint"></p><div id="err" role="alert"></div></form>
+<h2>Progress <span class="tip" tabindex="0" data-tip="Live status of queued, previewing, and completed auto-split jobs.">i</span></h2><div class="card scroll"><table id="jobs"></table></div>
+</section>
+
+<section id="panel-catmaid" class="panel">
+  <div class="card pad">
+    <div class="fields">
+      <label><span class="lbl-row">Sample / Project Profile <span class="tip" tabindex="0" data-tip="Saved CAVE + CATMAID connection profile. Choose '+ Custom Project' to configure a new dataset.">i</span></span><select id="cm-proj"></select></label>
+      <button type="button" id="cm-toggle-setup">Edit CATMAID / Resolution Setup</button>
+      <span class="tip" tabindex="0" data-tip="Show or hide server URLs, authentication credentials, and voxel resolution settings for the selected project.">i</span>
+    </div>
+    <p id="cm-proj-info" class="hint"></p>
+
+    <div id="cm-setup-box" class="box hide">
+      <div class="fields">
+        <label><span class="lbl-row">Project Name <span class="tip" tabindex="0" data-tip="Local profile name (e.g., Parker-Goog) used to store credentials and cache downloaded CATMAID skeletons.">i</span></span><input id="cm-name" placeholder="e.g. Parker-Goog"></label>
+        <label><span class="lbl-row">CAVE Datastack <span class="tip" tabindex="0" data-tip="CAVE segmentation datastack name from config.json.">i</span></span><input id="cm-ds" style="width:320px" placeholder="From config.json"></label>
+        <label><span class="lbl-row">CAVE Server URL <span class="tip" tabindex="0" data-tip="CAVE host URL (e.g., https://global.daf-apis.com). Uses your saved local CAVE token automatically.">i</span></span><input id="cm-srv" style="width:320px" placeholder="From config.json"></label>
+      </div>
+      <div class="fields" style="margin-top:12px">
+        <label><span class="lbl-row">CATMAID Server URL <span class="tip" tabindex="0" data-tip="Base CATMAID URL without '?pid=...' (e.g., https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem).">i</span></span><input id="cm-url" style="width:320px" placeholder="https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem"></label>
+        <label><span class="lbl-row">CATMAID Project ID <span class="tip" tabindex="0" data-tip="Numeric project ID ('pid=...') from your CATMAID browser address bar.">i</span></span><input id="cm-pid" type="number" min="1" value="15" style="width:105px"></label>
+        <label><span class="lbl-row">CATMAID API Token <span class="tip" tabindex="0" data-tip="Your 40-character personal CATMAID API token (in CATMAID: click your username top-right -> API token).">i</span></span><input id="cm-tok" type="password" placeholder="CATMAID API token"></label>
+        <label><span class="lbl-row">HTTP User (if required) <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth username if your server shows a browser login popup before CATMAID loads.">i</span></span><input id="cm-http-user" style="width:150px" placeholder="neurophyla user"></label>
+        <label><span class="lbl-row">HTTP Password <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth password (Phase 1 popup password, not your CATMAID account password).">i</span></span><input id="cm-http-pass" type="password" placeholder="HTTP password"></label>
+        <button type="button" id="cm-probe">1. Verify Connection &amp; Query</button>
+        <span class="tip" tabindex="0" data-tip="Test both CATMAID and CAVE authentication and auto-query available image stacks and voxel resolutions.">i</span>
+      </div>
+      <p id="cm-probe-msg" class="hint"></p>
+      <div id="cm-res-box" class="fields" style="margin-top:12px">
+        <label><span class="lbl-row">CATMAID Stack <span class="tip" tabindex="0" data-tip="Image stack found in this CATMAID project; selecting one fills its resolution if exposed by the server.">i</span></span><select id="cm-stack"><option value="">Verify connection or enter below</option></select></label>
+        <label><span class="lbl-row">CATMAID Resolution (x,y,z nm) <span class="tip" tabindex="0" data-tip="Physical voxel size in nanometers (e.g., 8,8,16) used to align CATMAID tracings with CAVE.">i</span></span><input id="cm-res" placeholder="e.g. 8,8,16"></label>
+        <label><span class="lbl-row">CAVE Resolution (x,y,z nm) <span class="tip" tabindex="0" data-tip="Base segmentation voxel resolution in nanometers queried from CAVE.">i</span></span><input id="cm-cave-res" placeholder="Queried from CAVE"></label>
+        <label><span class="lbl-row">CATMAID Coord Unit <span class="tip" tabindex="0" data-tip="Units used by CATMAID skeleton node coordinates ('nm' in almost all projects, or 'voxels').">i</span></span><select id="cm-unit"><option value="nm">nm</option><option value="voxels">voxels</option></select></label>
+        <button type="button" id="cm-save-proj" class="primary">2. Save Project Profile</button>
+        <span class="tip" tabindex="0" data-tip="Save credentials and resolutions locally in .cave_catmaid_config.json so you don't need to re-enter them.">i</span>
+      </div>
+    </div>
+  </div>
+
+  <h2>1. CATMAID &rarr; CAVE: Proofread CAVE Segments from CATMAID Skeletons <span class="tip" tabindex="0" data-tip="Use manual CATMAID skeletons as ground truth to detect and fix false merges (splits) and false splits (merges) in CAVE.">i</span></h2>
+  <div class="card pad">
+    <div class="fields">
+      <label><span class="lbl-row">Load Skeletons By <span class="tip" tabindex="0" data-tip="Fetch CATMAID skeletons either by a shared annotation tag or by explicit skeleton IDs.">i</span></span><select id="cm-mode"><option value="annotation">CATMAID Annotation</option><option value="skids">Skeleton IDs (comma-separated)</option></select></label>
+      <label><span class="lbl-row">Annotation or Skeleton IDs <span class="tip" tabindex="0" data-tip="Exact CATMAID annotation (e.g., MBON_i1) or comma-separated skeleton IDs (e.g., 12345, 67890).">i</span></span><input id="cm-query" style="width:300px" placeholder="e.g. MBON_i1 or 12345, 67890"></label>
+      <label><span class="lbl-row">Min Nodes / Side <span class="tip" tabindex="0" data-tip="Minimum internal CATMAID nodes required on each side of a conflict to propose a split or merge (filters tip noise).">i</span></span><input id="cm-min-nodes" type="number" min="1" value="3" style="width:95px"></label>
+      <label class="check"><input id="cm-refresh" type="checkbox"> Re-download SWCs <span class="tip" tabindex="0" data-tip="Ignore cached SWC files on disk and download fresh skeleton geometries from CATMAID.">i</span></label>
+      <button type="button" id="cm-plan-btn" class="primary">Download &amp; Build Dry-Run Plan</button>
+      <span class="tip" tabindex="0" data-tip="Map CATMAID internal nodes to CAVE and generate a read-only dry-run table of proposed splits and merges.">i</span>
+    </div>
+    <p id="cm-status" class="hint"></p>
+    <div id="cm-err" role="alert"></div>
+  </div>
+
+  <div id="cm-results" class="hide">
+    <div class="metrics" id="cm-metrics"></div>
+
+    <h2>Planned Splits (CAVE roots overlapping &gt;1 CATMAID skeleton) <span class="tip" tabindex="0" data-tip="False merges in CAVE where two or more distinct CATMAID neurons occupy the same CAVE segment.">i</span></h2>
+    <div class="fields" style="margin-bottom:8px">
+      <input id="cm-split-filter" style="width:280px" placeholder="Filter by CAVE Root ID or Skid...">
+      <button type="button" id="cm-splits-none">Uncheck All</button>
+      <button type="button" id="cm-splits-vis">Check Visible</button>
+      <span id="cm-splits-count" class="hint" style="margin:0"></span>
+    </div>
+    <div class="card scroll"><table id="cm-splits-tbl"></table></div>
+
+    <h2>Planned Merges (CATMAID skeletons spanning &gt;1 CAVE root) <span class="tip" tabindex="0" data-tip="False splits in CAVE where a single continuous CATMAID neuron crosses multiple CAVE segments.">i</span></h2>
+    <div class="fields" style="margin-bottom:8px">
+      <input id="cm-merge-filter" style="width:280px" placeholder="Filter by CATMAID Skid or Root ID...">
+      <button type="button" id="cm-merges-none">Uncheck All</button>
+      <button type="button" id="cm-merges-vis">Check Visible</button>
+      <span id="cm-merges-count" class="hint" style="margin:0"></span>
+    </div>
+    <div class="card scroll"><table id="cm-merges-tbl"></table></div>
+
+    <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button type="button" id="cm-exec-btn" class="danger">Execute Approved Splits &amp; Merges in CAVE</button>
+      <span class="tip" tabindex="0" data-tip="Apply only the checked rows in CAVE: splits execute first, root IDs refresh, then merges execute.">i</span>
+      <span id="cm-exec-summary" class="hint" style="margin:0">Executes all checked splits first, refreshes roots, then executes checked merges.</span>
+    </div>
+
+    <div id="cm-audit-wrap" class="hide">
+      <h2>Execution Audit Log <span class="tip" tabindex="0" data-tip="Record of every CAVE edit executed, including operation IDs needed if you ever want to undo a change.">i</span></h2>
+      <div class="card scroll"><table id="cm-audit-tbl"></table></div>
+    </div>
+  </div>
+
+  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segments via multi-CPU Kimimaro TEASAR, subtract already-traced CATMAID branches in the local neuron neighborhood, and upload missing backbones/arbors into CATMAID.">i</span></h2>
+  <div class="card pad">
+    <div class="fields">
+      <label><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
+        <textarea id="exp-roots" rows="2" style="width:270px" placeholder="720575940612345678, 720575940687654321"></textarea>
+      </label>
+      <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch (e.g., 'KC' gives every neuron the name 'KC', which CATMAID displays as 'KC <id> (KC1) [RIGHT]' when annotated; use 'KC {n}' if you also want sequential numbers in the name).">i</span></span>
+        <input id="exp-name" style="width:165px" placeholder="e.g. KC">
+      </label>
+      <label><span class="lbl-row">Kimimaro MIP <span class="tip" tabindex="0" data-tip="Downsampling MIP level fed to Kimimaro TEASAR (3 = higher detail, 4 = faster; automatic coordinate scaling is derived from the CAVE stack resolution at this MIP).">i</span></span>
+        <select id="exp-mip" style="width:80px"><option value="3">3</option><option value="4" selected>4</option><option value="2">2</option></select>
+      </label>
+      <label><span class="lbl-row">Parallel CPUs <span class="tip" tabindex="0" data-tip="Number of parallel CPU workers for Kimimaro TEASAR skeletonization.">i</span></span>
+        <select id="exp-parallel" style="width:80px"><option value="1">1</option><option value="2">2</option><option value="4">4</option><option value="8" selected>8</option></select>
+      </label>
+      <label><span class="lbl-row">Resample (nm) <span class="tip" tabindex="0" data-tip="Target inter-node spacing (nm) after Kimimaro TEASAR healing and smoothing (default 240 nm).">i</span></span>
+        <input id="exp-resample" type="number" min="16" value="240" style="width:85px">
+      </label>
+      <label><span class="lbl-row">CATMAID Search Annotations <span class="tip" tabindex="0" data-tip="Optional: restrict overlap checks to skeletons with these CATMAID annotations. Leave blank to automatically check only the tight 3D path around the CAVE neuron.">i</span></span>
+        <input id="exp-search-ann" style="width:200px" placeholder="Optional (blank = local path)">
+      </label>
+      <label><span class="lbl-row">Cut Buffer (nm) <span class="tip" tabindex="0" data-tip="Exclusion radius (nm) around existing CATMAID nodes. CAVE nodes inside this radius are cut away so manual tracings and synapses are never duplicated.">i</span></span>
+        <input id="exp-buffer" type="number" min="50" value="400" style="width:85px">
+      </label>
+      <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (1 = keep exact Kimimaro resampled spacing).">i</span></span>
+        <input id="exp-slice-step" type="number" min="1" max="20" value="1" style="width:75px">
+      </label>
+      <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC, KC1, RIGHT) applied to all neurons in the batch. CATMAID's Neuron Name Service renders these as (KC1) [RIGHT].">i</span></span>
+        <input id="exp-target-ann" style="width:195px" placeholder="e.g. KC, KC1, RIGHT">
+      </label>
+      <label class="check"><input id="exp-stitch" type="checkbox"> Auto-stitch into Master <span class="tip" tabindex="0" data-tip="Optional (off by default): automatically join exported missing subtrees onto the paired CATMAID skeleton. Leave unchecked to review and merge manually in CATMAID.">i</span></label>
+      <button type="button" id="exp-plan-btn" class="primary">Build Export Dry-Run Plan</button>
+      <span class="tip" tabindex="0" data-tip="Run Kimimaro skeletonization, preview pairing, node counts, and editable neuron names before uploading anything to CATMAID.">i</span>
+    </div>
+    <p class="hint">Uses ZlaticLab's <b>Kimimaro TEASAR + navis</b> pipeline (heal &rarr; smooth &rarr; resample). Set <b>Z-Slice Step = 1</b> to keep raw resampled spacing.</p>
+    <div id="exp-prog-wrap" class="pbar-wrap hide">
+      <div class="pbar-head">
+        <span id="exp-status" class="msg"></span>
+        <span class="pbar-meta">
+          <span id="exp-pct-lbl" class="time"></span>
+          <span id="exp-time-badge" class="s hide"></span>
+        </span>
+      </div>
+      <div class="pbar-track"><div id="exp-pbar-fill" class="pbar-fill"></div></div>
+    </div>
+    <div id="exp-err" role="alert"></div>
+  </div>
+
+  <div id="exp-results" class="hide">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin:28px 0 10px">
+      <h2 style="margin:0">Export Dry-Run Plan <span class="tip" tabindex="0" data-tip="Review how each CAVE segment matched existing CATMAID skeletons, edit names, or remove operations you do not want.">i</span></h2>
+      <button type="button" id="exp-clear-btn">Clear Plan</button>
+    </div>
+    <div class="card scroll"><table id="exp-tbl"></table></div>
+    <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button type="button" id="exp-exec-btn" class="primary">Export Approved Skeletons to CATMAID</button>
+      <span class="tip" tabindex="0" data-tip="Upload approved non-overlapping fragments to CATMAID, stitch if enabled, and apply Target CATMAID Annotations.">i</span>
+      <span class="hint" style="margin:0">Uploads only non-overlapping missing branches and applies Target CATMAID Annotations.</span>
+    </div>
+    <div id="exp-audit-wrap" class="hide">
+      <h2>CATMAID Export Log <span class="tip" tabindex="0" data-tip="Summary of resulting CATMAID skeleton IDs, uploaded node counts, and applied annotations.">i</span></h2>
+      <div class="card scroll"><table id="exp-audit-tbl"></table></div>
+    </div>
+  </div>
+</section>
+
+<section id="panel-changelog" class="panel">
+  <div class="metrics" id="cl-metrics"></div>
+  <div class="card pad">
+    <div class="fields">
+      <label><span class="lbl-row">Where (System) <span class="tip" tabindex="0" data-tip="Filter changes by whether they modified CAVE segmentation or CATMAID skeletons.">i</span></span>
+        <select id="cl-sys"><option value="ALL">All (CAVE &amp; CATMAID)</option><option value="CAVE">CAVE Only</option><option value="CATMAID">CATMAID Only</option></select>
+      </label>
+      <label><span class="lbl-row">Search <span class="tip" tabindex="0" data-tip="Filter by root ID, CATMAID skeleton ID, project name, action, operation ID, or annotation.">i</span></span>
+        <input id="cl-search" style="width:280px" placeholder="Root ID, SKID, project, op ID, annotation...">
+      </label>
+      <a id="cl-csv-link" class="btn" target="_blank" rel="noopener">Download CSV</a>
+      <button type="button" id="cl-copy-all">Copy Register</button>
+    </div>
+    <p class="hint">Persisted automatically to <code>outputs/change_register.json</code> and <code>outputs/change_register.csv</code> across restarts.</p>
+  </div>
+  <h2>Register of Changes in CAVE and CATMAID <span class="tip" tabindex="0" data-tip="Chronological log (newest first) of every mutation made in CAVE and CATMAID.">i</span></h2>
+  <div class="card scroll"><table id="cl-tbl"></table></div>
+</section>
+
+<div id="tooltip" role="tooltip"></div>
+
+<script>
+const T=new URLSearchParams(location.search).get('token'),$=i=>document.getElementById(i);
+$('help').href='help?token='+encodeURIComponent(T);
+$('cl-csv-link').href='api/changelog.csv?token='+encodeURIComponent(T);
+const api=async(p,b)=>{const r=await fetch(p,{method:b?'POST':'GET',headers:{'X-Token':T},body:b&&JSON.stringify(b)});const j=await r.json();
+ if(!r.ok)throw new Error(j.error||r.status);return j};
+const LABEL={queued:'Queued',previewing:'Previewing',splitting:'Splitting',preview_passed:'Preview passed',preview_failed:'Preview failed',split:'Split',
+ not_separated:'Split, sides not separated',failed:'Failed',unknown:'Outcome unknown'};
+const CLS={preview_passed:'good',split:'good',preview_failed:'bad',failed:'bad',unknown:'bad',not_separated:'bad',queued:'busy',previewing:'busy',splitting:'busy'};
+const el=(t,txt,c)=>{const e=document.createElement(t);if(txt!=null)e.textContent=txt;if(c)e.className=c;return e};
+const safe=f=>async()=>{try{$('err').textContent='';await f();await draw()}catch(e){$('err').textContent=e.message}};
+const btn=(txt,fn,c)=>{const b=el('button',txt,c);b.onclick=safe(fn);return b};
+
+const tipBox=$('tooltip');let pinnedTip=null;
+function showTip(target){
+  const txt=target&&target.dataset?target.dataset.tip:'';
+  if(!txt){tipBox.classList.remove('show');return}
+  tipBox.textContent=txt;tipBox.classList.add('show');
+  const r=target.getBoundingClientRect(),tr=tipBox.getBoundingClientRect();
+  let left=r.left+r.width/2-tr.width/2;
+  left=Math.max(10,Math.min(window.innerWidth-tr.width-10,left));
+  let top=r.top-tr.height-8;
+  if(top<10)top=r.bottom+8;
+  tipBox.style.left=left+'px';tipBox.style.top=top+'px';
+}
+function hideTip(){pinnedTip=null;tipBox.classList.remove('show')}
+document.addEventListener('mouseover',e=>{const t=e.target.closest('.tip');if(t)showTip(t)});
+document.addEventListener('mouseout',e=>{const t=e.target.closest('.tip');if(t&&t!==pinnedTip)tipBox.classList.remove('show')});
+document.addEventListener('focusin',e=>{const t=e.target.closest('.tip');if(t)showTip(t)});
+document.addEventListener('focusout',e=>{if(e.target.closest('.tip'))hideTip()});
+document.addEventListener('click',e=>{const t=e.target.closest('.tip');if(t){e.preventDefault();e.stopPropagation();pinnedTip=t;showTip(t)}else if(pinnedTip){hideTip()}});
+
+function copyText(text,b){const done=()=>{if(b){const orig=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=orig,1500)}};
+ if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text).then(done,()=>fallback());fallback();
+ function fallback(){const a=el('textarea');a.value=text;a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();
+  try{document.execCommand('copy');done()}catch(e){prompt('Copy with Ctrl+C / Cmd+C:',text)}a.remove()}}
+const edit=(r,n)=>confirm(n>1?`Up to ${2**n-1} real edits over ${n} rounds, starting with ${r}. Later rounds start without asking. Continue?`:`Real edit on ${r}. It can't be cancelled. Continue?`);
+function hint(){const n=+$('rounds').value||1;$('hint').textContent=(n>1?`Up to ${2**n-1} edits and ${2**n} large pieces. `:'')+($('preview').checked
+ ?(n>1?'Each cut is previewed first and made without asking if its preview passes.':'The cut is made without asking if its preview passes.')
+ :(n>1?'No previews: every cut is made without asking, after one confirmation.':'No preview: the cut is made after one confirmation.'))}
+function row(j,now,depth){const r=el('tr'),seg=el('td',null,'id'),st=el('td'),a=el('td'),n=j.rounds||1;seg.style.paddingLeft=14+depth*20+'px';seg.append((depth?'└ ':'')+j.root);
+ if(depth+n>1)seg.append(el('span',`Round ${depth+1} of ${depth+n}`,'round'));
+ st.append(el('span',LABEL[j.status]||j.status,'s '+(CLS[j.status]||'')));
+ if(CLS[j.status]=='busy')st.append(el('div',Math.round(now-j.started)+' s','time'));
+ if(j.status=='preview_passed')a.append(btn('Split',()=>edit(j.root,n)?api('/api/act',{id:j.id,action:'split'}):0,'danger'));
+ if(j.status=='unknown')a.append(btn('Re-check',()=>api('/api/act',{id:j.id,action:'recheck'})));
+ const m=el('td',null,'msg');m.append(el('span',j.message));
+ if(j.message){const b=el('button','Copy','copy');b.title='Copy the full result, including any raw server error';
+  b.onclick=()=>copyText(`${j.sample} ${j.root} ${LABEL[j.status]||j.status}\n${j.message}`+(j.detail?`\n\nFull error:\n${j.detail}`:''),b);m.append(b)}
+ r.append(el('td',j.sample),seg,st,m,a);return r}
+const selecting=()=>{const s=getSelection();return s&&!s.isCollapsed&&$('jobs').contains(s.anchorNode)};
+async function draw(){const d=await api('/api/state');if(selecting())return;const s=$('sample');if(!s.options.length)for(const x of d.samples)s.append(new Option(x,x));$('rounds').max=d.max_rounds;
+ const t=$('jobs'),h=el('tr');for(const x of['Sample','Segment','Status','Result',''])h.append(el('th',x));t.replaceChildren(h);
+ if(!d.jobs.length){const r=el('tr'),c=el('td','Nothing yet.','msg');c.colSpan=5;r.append(c);t.append(r)}
+ const kids={};for(const j of d.jobs)(kids[j.parent]??=[]).push(j);
+ const walk=(j,depth)=>{t.append(row(j,d.now,depth));(kids[j.id]||[]).forEach(c=>walk(c,depth+1))};
+ d.jobs.filter(j=>j.parent==null).reverse().forEach(j=>walk(j,0))}
+$('f').oninput=hint;hint();
+$('f').onsubmit=e=>{e.preventDefault();safe(async()=>{const root=$('root').value.trim(),preview=$('preview').checked,rounds=+$('rounds').value;if(!preview&&!edit(root,rounds))return;
+ await api('/api/start',{sample:$('sample').value,root,preview,rounds});$('root').value=''})()};
+draw().catch(e=>$('err').textContent=e.message);setInterval(()=>draw().catch(e=>$('err').textContent='Lost contact with the server: '+e.message),3000);
+
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');$('panel-'+b.dataset.tab).classList.add('active');
+});
+
+let cmCache=null,cmSplits=[],cmMerges=[],cmRenderedKey='',cmConfiguredSet=new Set();
+let expPlan=[],expRenderedKey='',clEntries=[],clRenderedKey='';
+const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('cm-err').textContent=e.message}};
+const expSafe=f=>async()=>{try{$('exp-err').textContent='';await f()}catch(e){$('exp-err').textContent=e.message}};
+
+function fillProjectForm(name,d){
+  const projects=d.projects||{},samples=d.sample_datastacks||{},defaultSrv=d.default_server||'';
+  const cfg=projects[name];
+  $('cm-probe-msg').textContent='';$('cm-probe-msg').classList.remove('ok');
+  if(!cfg){
+    $('cm-name').value=(name&&name!=='+ Custom Project')?name:'';
+    $('cm-ds').value=samples[name]||'';
+    $('cm-srv').value=defaultSrv;
+    $('cm-url').value='';$('cm-pid').value='15';$('cm-tok').value='';
+    $('cm-http-user').value='';$('cm-http-pass').value='';
+    $('cm-res').value='';$('cm-cave-res').value='';$('cm-unit').value='nm';
+    $('cm-proj-info').textContent=`First-time setup for "${name||'new project'}": enter your CATMAID credentials below and click Verify Connection & Query.`;
+    $('cm-setup-box').classList.remove('hide');
+    return;
+  }
+  $('cm-name').value=name;$('cm-ds').value=cfg.cave_datastack||samples[name]||'';$('cm-srv').value=cfg.cave_server_address||defaultSrv;
+  $('cm-url').value=cfg.catmaid_url||'';$('cm-pid').value=cfg.catmaid_project_id||15;$('cm-tok').value='';
+  $('cm-http-user').value=cfg.catmaid_http_user||'';$('cm-http-pass').value='';
+  $('cm-res').value=(cfg.catmaid_resolution_nm||[]).join(',');$('cm-cave-res').value=(cfg.cave_resolution_nm||[]).join(',');
+  $('cm-unit').value=cfg.catmaid_coord_unit||'nm';
+  $('cm-proj-info').textContent=`Loaded saved profile: ${name} | Datastack: ${$('cm-ds').value} | CATMAID res: [${$('cm-res').value}] nm | CAVE res: [${$('cm-cave-res').value}] nm`;
+}
+
+function updateCmCounts(){
+  const nS=cmSplits.filter(x=>x.approve).length,nM=cmMerges.filter(x=>x.approve).length;
+  $('cm-exec-summary').textContent=`Selected for execution: ${nS} split(s) and ${nM} merge(s) (unchecked rows are skipped).`;
+}
+function visibleSplitIndices(){
+  const q=($('cm-split-filter').value||'').trim().toLowerCase();
+  return cmSplits.map((r,i)=>({r,i})).filter(({r})=>!q||[r.target_root_id,r.source_skid,r.sink_skids].join(' ').toLowerCase().includes(q)).map(x=>x.i);
+}
+function visibleMergeIndices(){
+  const q=($('cm-merge-filter').value||'').trim().toLowerCase();
+  return cmMerges.map((r,i)=>({r,i})).filter(({r})=>!q||[r.skeleton_id,r.primary_root_id,r.fragment_root_id].join(' ').toLowerCase().includes(q)).map(x=>x.i);
+}
+function drawSplitsTable(){
+  const vis=visibleSplitIndices();
+  const nSel=cmSplits.filter(x=>x.approve).length;
+  $('cm-splits-count').textContent=`Selected: ${nSel} / ${cmSplits.length} (showing ${vis.length})`;
+  updateCmCounts();
+  const st=$('cm-splits-tbl'),sh=el('tr');
+  ['Approve','CAVE Root ID','Source Skid','Sink Skids','Source / Sink Nodes','3D Preview'].forEach(x=>sh.append(el('th',x)));
+  st.replaceChildren(sh);
+  if(!vis.length){const r=el('tr'),c=el('td',cmSplits.length?'No splits match your filter.':'No false merges detected (0 splits needed).','msg');c.colSpan=6;r.append(c);st.append(r);return}
+  vis.forEach(idx=>{
+    const row=cmSplits[idx];
+    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;
+    cb.onchange=()=>{cmSplits[idx].approve=cb.checked;const n=cmSplits.filter(x=>x.approve).length;$('cm-splits-count').textContent=`Selected: ${n} / ${cmSplits.length} (showing ${vis.length})`;updateCmCounts()};
+    const tdCb=el('td');tdCb.append(cb);
+    const tdAct=el('td'),out=el('span',null,'msg');
+    const pb=el('button','Preview 3D');
+    pb.onclick=cmSafe(async()=>{
+      pb.disabled=true;out.textContent=' Querying CAVE...';
+      try{
+        const res=await api('/api/catmaid/preview_split',row);
+        out.textContent=res.split_valid?` Valid (${res.predicted_component_count} pieces)`:' Invalid cut';
+        const a=el('a','Open Neuroglancer','ngl');a.href=res.neuroglancer_url;a.target='_blank';a.rel='noopener';out.append(a);
+      }finally{pb.disabled=false}
+    });
+    tdAct.append(pb,out);
+    r.append(tdCb,el('td',row.target_root_id,'id'),el('td',String(row.source_skid),'id'),el('td',String(row.sink_skids),'id'),
+             el('td',`${row.source_nodes} / ${row.sink_nodes}`),tdAct);
+    st.append(r);
+  });
+}
+function drawMergesTable(){
+  const vis=visibleMergeIndices();
+  const nSel=cmMerges.filter(x=>x.approve).length;
+  $('cm-merges-count').textContent=`Selected: ${nSel} / ${cmMerges.length} (showing ${vis.length})`;
+  updateCmCounts();
+  const mt=$('cm-merges-tbl'),mh=el('tr');
+  ['Approve','CATMAID Skid','Primary Root ID','Fragment Root ID','Primary / Fragment Nodes'].forEach(x=>mh.append(el('th',x)));
+  mt.replaceChildren(mh);
+  if(!vis.length){const r=el('tr'),c=el('td',cmMerges.length?'No merges match your filter.':'No false splits detected (0 merges needed).','msg');c.colSpan=5;r.append(c);mt.append(r);return}
+  vis.forEach(idx=>{
+    const row=cmMerges[idx];
+    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;
+    cb.onchange=()=>{cmMerges[idx].approve=cb.checked;const n=cmMerges.filter(x=>x.approve).length;$('cm-merges-count').textContent=`Selected: ${n} / ${cmMerges.length} (showing ${vis.length})`;updateCmCounts()};
+    const tdCb=el('td');tdCb.append(cb);
+    r.append(tdCb,el('td',String(row.skeleton_id),'id'),el('td',row.primary_root_id,'id'),el('td',row.fragment_root_id,'id'),
+             el('td',`${row.primary_nodes} / ${row.fragment_nodes}`));
+    mt.append(r);
+  });
+}
+$('cm-split-filter').oninput=drawSplitsTable;
+$('cm-splits-none').onclick=()=>{cmSplits.forEach(x=>x.approve=false);drawSplitsTable()};
+$('cm-splits-vis').onclick=()=>{visibleSplitIndices().forEach(i=>cmSplits[i].approve=true);drawSplitsTable()};
+$('cm-merge-filter').oninput=drawMergesTable;
+$('cm-merges-none').onclick=()=>{cmMerges.forEach(x=>x.approve=false);drawMergesTable()};
+$('cm-merges-vis').onclick=()=>{visibleMergeIndices().forEach(i=>cmMerges[i].approve=true);drawMergesTable()};
+
+function renderCatmaidTables(d){
+  const key=JSON.stringify([d.status,d.summary,d.splits.length,d.merges.length,d.audit.length]);
+  if(key===cmRenderedKey)return;
+  cmRenderedKey=key;
+  if(!d.summary){$('cm-results').classList.add('hide');return}
+  $('cm-results').classList.remove('hide');
+  cmSplits=d.splits.map(x=>({...x}));cmMerges=d.merges.map(x=>({...x}));
+
+  const m=$('cm-metrics');m.replaceChildren();
+  [['Skeletons Loaded',d.summary.total_skeletons],['Clean 1-to-1',d.summary.clean_1to1_skeletons],
+   ['Planned Splits',d.summary.planned_splits],['Planned Merges',d.summary.planned_merges]].forEach(([lbl,val])=>{
+    const c=el('div',null,'metric');c.append(el('div',lbl,'hint'),el('div',String(val),'v'));m.append(c);
+  });
+
+  drawSplitsTable();
+  drawMergesTable();
+
+  if(d.audit&&d.audit.length){
+    $('cm-audit-wrap').classList.remove('hide');
+    const at=$('cm-audit-tbl'),ah=el('tr');
+    ['Action','Status','Skeleton ID','Old Root','New Root(s)','Op ID / Error'].forEach(x=>ah.append(el('th',x)));
+    at.replaceChildren(ah);
+    d.audit.forEach(a=>{
+      const r=el('tr');
+      r.append(el('td',a.action),el('td',a.status),el('td',String(a.skeleton_id),'id'),el('td',a.old_root_id,'id'),
+               el('td',a.new_root_ids,'id'),el('td',a.error||String(a.operation_id||''),'msg'));
+      at.append(r);
+    });
+  }else{$('cm-audit-wrap').classList.add('hide')}
+}
+
+function formatSec(sec){
+  if(sec==null||isNaN(sec))return '';
+  return sec<60?`${Number(sec).toFixed(1)} s`:`${Math.floor(sec/60)}m ${(sec%60).toFixed(1)}s`;
+}
+
+function renderExportProgress(d){
+  const wrap=$('exp-prog-wrap'),st=$('exp-status'),pctLbl=$('exp-pct-lbl'),badge=$('exp-time-badge'),fill=$('exp-pbar-fill');
+  const active=(d.export_status==='loading'||d.export_status==='executing');
+  const txt=d.export_progress||d.export_message||'';
+  if(!txt&&d.export_status==='idle'){wrap.classList.add('hide');return}
+  wrap.classList.remove('hide');
+  st.textContent=txt;
+  const pct=Math.max(0,Math.min(100,Number(d.export_pct||0)));
+  fill.style.width=pct+'%';
+  fill.classList.remove('done','fail');
+  badge.classList.remove('hide','good','bad','busy');
+  if(active){
+    pctLbl.textContent=pct+'%';
+    badge.textContent='Running: '+formatSec(d.export_running_sec||0);
+    badge.classList.add('busy');
+  }else if(d.export_status==='ready'||d.export_status==='done'){
+    fill.classList.add('done');
+    pctLbl.textContent='100%';
+    if(d.export_elapsed_sec!=null){
+      badge.textContent='Executed in '+formatSec(d.export_elapsed_sec);
+      badge.classList.add('good');
+    }else{badge.classList.add('hide')}
+  }else if(d.export_status==='failed'){
+    fill.classList.add('fail');
+    pctLbl.textContent='';
+    if(d.export_elapsed_sec!=null){
+      badge.textContent='Failed after '+formatSec(d.export_elapsed_sec);
+      badge.classList.add('bad');
+    }else{badge.classList.add('hide')}
+  }else{
+    pctLbl.textContent='';
+    badge.classList.add('hide');
+  }
+}
+
+function updateExpExecButton(busy){
+  const nApp=expPlan.filter(x=>x.approve).length;
+  $('exp-exec-btn').textContent=`Export Approved Skeletons to CATMAID (${nApp})`;
+  $('exp-exec-btn').disabled=!!busy||nApp===0;
+}
+
+function drawExportPlanTable(){
+  if(!expPlan.length){
+    $('exp-results').classList.add('hide');
+    updateExpExecButton(false);
+    return;
+  }
+  $('exp-results').classList.remove('hide');
+  const et=$('exp-tbl'),eh=el('tr');
+  ['Approve','CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Neuron / Fragment Name(s)',''].forEach(x=>eh.append(el('th',x)));
+  et.replaceChildren(eh);
+  expPlan.forEach((row,idx)=>{
+    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;
+    cb.onchange=()=>{expPlan[idx].approve=cb.checked;updateExpExecButton(false)};
+    const tdCb=el('td');tdCb.append(cb);
+    const tdName=el('td');
+    if(row.fragment_count>0){
+      const inp=el('input',null,'cell-in');
+      inp.value=row.fragment_names||'';
+      inp.oninput=()=>expPlan[idx].fragment_names=inp.value;
+      tdName.append(inp);
+    }else{
+      tdName.textContent='(already complete)';tdName.className='msg';
+    }
+    const tdRm=el('td');
+    const rmBtn=el('button','Remove','rm-btn');
+    rmBtn.type='button';
+    rmBtn.title='Remove this operation from the dry-run plan';
+    rmBtn.onclick=()=>{expPlan.splice(idx,1);drawExportPlanTable()};
+    tdRm.append(rmBtn);
+    r.append(tdCb,el('td',row.cave_root_id,'id'),el('td',row.match_type),el('td',row.paired_skids,'id'),
+             el('td',`${row.kept_nodes} / ${row.total_nodes}`),tdName,tdRm);
+    et.append(r);
+  });
+  updateExpExecButton(false);
+}
+
+$('exp-clear-btn').onclick=()=>{expPlan=[];drawExportPlanTable()};
+
+function renderExportTables(d){
+  const key=JSON.stringify([d.export_status,(d.export_plan||[]).length,(d.export_audit||[]).length,d.export_elapsed_sec]);
+  if(key!==expRenderedKey){
+    expRenderedKey=key;
+    expPlan=(d.export_plan||[]).map(x=>({...x}));
+    drawExportPlanTable();
+  }
+  const expBusy=(d.export_status==='loading'||d.export_status==='executing');
+  updateExpExecButton(expBusy);
+
+  if(d.export_audit&&d.export_audit.length){
+    $('exp-results').classList.remove('hide');
+    $('exp-audit-wrap').classList.remove('hide');
+    const at=$('exp-audit-tbl'),ah=el('tr');
+    ['CAVE Root ID','Status','Resulting CATMAID SKID(s)','Fragment Names','Nodes Added','Annotations','Details'].forEach(x=>ah.append(el('th',x)));
+    at.replaceChildren(ah);
+    d.export_audit.forEach(a=>{
+      const r=el('tr');
+      r.append(el('td',a.cave_root_id,'id'),el('td',a.status),el('td',a.resulting_skids,'id'),
+               el('td',a.fragment_names,'msg'),el('td',String(a.nodes_added)),el('td',a.annotations,'msg'),el('td',a.details,'msg'));
+      at.append(r);
+    });
+  }else{$('exp-audit-wrap').classList.add('hide')}
+}
+
+function renderChangelog(force){
+  const sysFilter=$('cl-sys').value;
+  const q=($('cl-search').value||'').trim().toLowerCase();
+  const key=JSON.stringify([clEntries.length,clEntries[0]?clEntries[0].id:0,sysFilter,q]);
+  if(!force&&key===clRenderedKey)return;
+  clRenderedKey=key;
+
+  $('cl-badge').textContent=String(clEntries.length);
+  const caveCnt=clEntries.filter(x=>x.system==='CAVE').length;
+  const cmCnt=clEntries.filter(x=>x.system==='CATMAID').length;
+  const m=$('cl-metrics');m.replaceChildren();
+  [['Total Recorded Changes',clEntries.length],['Changes in CAVE',caveCnt],['Changes in CATMAID',cmCnt]].forEach(([lbl,val])=>{
+    const c=el('div',null,'metric');c.append(el('div',lbl,'hint'),el('div',String(val),'v'));m.append(c);
+  });
+
+  const filtered=clEntries.filter(x=>{
+    if(sysFilter!=='ALL'&&x.system!==sysFilter)return false;
+    if(!q)return true;
+    const blob=[x.timestamp,x.system,x.project,x.target,x.action,x.before_ids,x.after_ids,x.operation_id,x.summary].join(' ').toLowerCase();
+    return blob.includes(q);
+  });
+
+  const t=$('cl-tbl'),h=el('tr');
+  ['Time (UTC)','Where','Project','Action','Before','After','Op ID','What Changed'].forEach(x=>h.append(el('th',x)));
+  t.replaceChildren(h);
+  if(!filtered.length){
+    const r=el('tr'),c=el('td',clEntries.length?'No matching entries for current filter.':'No changes recorded yet.','msg');
+    c.colSpan=8;r.append(c);t.append(r);return;
+  }
+  filtered.forEach(x=>{
+    const r=el('tr');
+    const tdSys=el('td');
+    tdSys.append(el('span',x.system,'s '+(x.system==='CAVE'?'sys-cave':'sys-cm')));
+    const tdDet=el('td',null,'msg');
+    tdDet.append(el('span',x.summary+(x.target?` (${x.target})`:'')));
+    const cb=el('button','Copy','copy');
+    cb.onclick=()=>copyText(`[${x.timestamp}] ${x.system} | ${x.project} | ${x.action} | Before: ${x.before_ids} -> After: ${x.after_ids} | Op: ${x.operation_id} | ${x.summary}`,cb);
+    tdDet.append(cb);
+    r.append(el('td',x.timestamp,'time'),tdSys,el('td',x.project),el('td',x.action),
+             el('td',x.before_ids,'id'),el('td',x.after_ids,'id'),el('td',x.operation_id||'-','id'),tdDet);
+    t.append(r);
+  });
+}
+
+$('cl-sys').onchange=()=>renderChangelog(true);
+$('cl-search').oninput=()=>renderChangelog(true);
+$('cl-copy-all').onclick=()=>{
+  const lines=clEntries.map(x=>`[${x.timestamp}] ${x.system} | ${x.project} | ${x.action} | Before: ${x.before_ids} -> After: ${x.after_ids} | Op: ${x.operation_id} | ${x.summary}`);
+  copyText(lines.join('\n')||'No changes recorded yet.',$('cl-copy-all'));
+};
+
+let cmPollTimer=null;
+function scheduleCatmaidPoll(fast){
+  if(cmPollTimer)clearTimeout(cmPollTimer);
+  cmPollTimer=setTimeout(()=>drawCatmaid().catch(()=>{}),fast?1000:3000);
+}
+
+async function drawCatmaid(){
+  const d=await api('/api/catmaid/state');cmCache=d;
+  const sel=$('cm-proj');
+  const allNames=Array.from(new Set([...Object.keys(d.sample_datastacks||{}),...Object.keys(d.projects||{})]));
+  const opts=[...allNames,'+ Custom Project'];
+  if(sel.options.length!==opts.length||[...sel.options].some((o,i)=>o.value!==opts[i])){
+    const prev=sel.value;sel.replaceChildren();
+    opts.forEach(n=>sel.append(new Option(n,n)));
+    sel.value=allNames.includes(prev)?prev:(d.active_project&&allNames.includes(d.active_project)?d.active_project:opts[0]);
+    fillProjectForm(sel.value,d);
+  }
+  cmConfiguredSet=new Set(Object.keys(d.projects||{}));
+  $('cm-status').textContent=d.progress||d.message||'';
+  $('cm-plan-btn').disabled=(d.status==='loading'||d.status==='executing');
+  $('cm-exec-btn').disabled=(d.status==='loading'||d.status==='executing');
+  renderExportProgress(d);
+  const expBusy=(d.export_status==='loading'||d.export_status==='executing');
+  const cmBusy=(d.status==='loading'||d.status==='executing');
+  $('exp-plan-btn').disabled=expBusy;
+  clEntries=d.changelog||[];
+  renderCatmaidTables(d);
+  renderExportTables(d);
+  renderChangelog(false);
+  scheduleCatmaidPoll(expBusy||cmBusy);
+}
+
+$('cm-proj').onchange=()=>{if(cmCache){$('cm-setup-box').classList.add('hide');fillProjectForm($('cm-proj').value,cmCache)}};
+$('cm-toggle-setup').onclick=()=>$('cm-setup-box').classList.toggle('hide');
+
+$('cm-probe').onclick=cmSafe(async()=>{
+  const pm=$('cm-probe-msg');pm.classList.remove('ok');
+  pm.textContent='Verifying CATMAID and CAVE connections...';
+  const res=await api('/api/catmaid/probe',{
+    project_name:$('cm-name').value,
+    cave_datastack:$('cm-ds').value,cave_server_address:$('cm-srv').value,
+    catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value,
+    catmaid_http_user:$('cm-http-user').value,catmaid_http_password:$('cm-http-pass').value
+  });
+  $('cm-cave-res').value=(res.cave_resolution_nm||[]).join(',');
+  const st=$('cm-stack');st.replaceChildren();
+  const stacks=res.catmaid_stacks||[];
+  if(stacks.length){
+    stacks.forEach(s=>{
+      const rTxt=s.resolution_nm?`${s.resolution_nm.join('x')} nm`:'enter resolution manually below';
+      st.append(new Option(`${s.title} [ID ${s.stack_id}] (${rTxt})`,s.resolution_nm?s.resolution_nm.join(','):''));
+    });
+    if(stacks[0].resolution_nm){$('cm-res').value=stacks[0].resolution_nm.join(',')}
+    const names=stacks.map(s=>`${s.title} (ID ${s.stack_id})`).join(', ');
+    pm.textContent=`Connected to CATMAID & CAVE! Verified stack(s): ${names}. Confirm or enter CATMAID resolution (x,y,z nm) below and click Save Project Profile.`;
+  }else{
+    st.append(new Option('Connected - enter resolution manually below',''));
+    pm.textContent='Connected to CATMAID & CAVE! Enter CATMAID resolution (x,y,z nm) below and click Save Project Profile.';
+  }
+  pm.classList.add('ok');
+});
+$('cm-stack').onchange=()=>{if($('cm-stack').value)$('cm-res').value=$('cm-stack').value};
+
+$('cm-save-proj').onclick=cmSafe(async()=>{
+  await api('/api/catmaid/save_project',{
+    project_name:$('cm-name').value,cave_datastack:$('cm-ds').value,cave_server_address:$('cm-srv').value,
+    cave_resolution_nm:$('cm-cave-res').value.split(',').map(Number),
+    catmaid_url:$('cm-url').value,catmaid_project_id:+$('cm-pid').value,catmaid_token:$('cm-tok').value,
+    catmaid_http_user:$('cm-http-user').value,catmaid_http_password:$('cm-http-pass').value,
+    catmaid_resolution_nm:$('cm-res').value.split(',').map(Number),catmaid_coord_unit:$('cm-unit').value
+  });
+  $('cm-setup-box').classList.add('hide');
+  $('cm-status').textContent='Project profile saved locally to .cave_catmaid_config.json.';
+  $('cm-proj').replaceChildren();
+  await drawCatmaid();
+});
+
+$('cm-plan-btn').onclick=cmSafe(async()=>{
+  const proj=$('cm-proj').value;
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
+  await api('/api/catmaid/plan',{
+    project_name:proj,mode:$('cm-mode').value,query:$('cm-query').value,
+    min_nodes:+$('cm-min-nodes').value||3,force_refresh:$('cm-refresh').checked
+  });
+  await drawCatmaid();
+});
+
+$('cm-exec-btn').onclick=cmSafe(async()=>{
+  const nS=cmSplits.filter(x=>x.approve).length,nM=cmMerges.filter(x=>x.approve).length;
+  if(!confirm(`Execute ${nS} split(s) and ${nM} merge(s) in CAVE? Real chunkedgraph edits will be made.`))return;
+  await api('/api/catmaid/execute',{splits:cmSplits,merges:cmMerges});
+  await drawCatmaid();
+});
+
+$('exp-plan-btn').onclick=expSafe(async()=>{
+  const proj=$('cm-proj').value;
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
+  await api('/api/catmaid/export_plan',{
+    project_name:proj,
+    cave_roots:$('exp-roots').value,
+    base_neuron_name:$('exp-name').value,
+    mip:+$('exp-mip').value,
+    parallel:+$('exp-parallel').value||8,
+    resample_to_nm:+$('exp-resample').value||240,
+    search_annotations:$('exp-search-ann').value,
+    cut_buffer_nm:+$('exp-buffer').value||400,
+    slice_step:+$('exp-slice-step').value||1
+  });
+  await drawCatmaid();
+});
+
+$('exp-exec-btn').onclick=expSafe(async()=>{
+  const nE=expPlan.filter(x=>x.approve).length;
+  if(!nE)throw new Error('Approve at least one CAVE segment row first.');
+  if(!confirm(`Upload approved CAVE skeleton fragments for ${nE} segment(s) into CATMAID?`))return;
+  await api('/api/catmaid/export_execute',{
+    plan:expPlan,
+    target_annotations:$('exp-target-ann').value,
+    auto_stitch:$('exp-stitch').checked
+  });
+  await drawCatmaid();
+});
+
+drawCatmaid().catch(()=>scheduleCatmaidPoll(false));
+</script></main></body></html>
