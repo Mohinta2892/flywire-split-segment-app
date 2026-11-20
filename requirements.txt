@@ -14,3 +14,4 @@ cloud-volume        # Fast batched supervoxel lookups via CloudVolume.scattered_
 python-catmaid      # PyPI package for `import pymaid` (CATMAID API, stack queries, and skeleton uploads)
 navis               # Local SWC skeleton caching, neuron node tree handling, healing, smoothing, and resampling
 kimimaro            # TEASAR volumetric skeletonization of CAVE segmentation volumes
+skeletor			# mesh-to-skeleton converter, producing skeletons that can be wrapped into navis neuron objects for morphometrics
