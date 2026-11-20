@@ -1,17 +1,16 @@
-# Python 3.9 or newer. Original app.py uses only the standard library;
-# original dependencies are for splitter.py and the CAVE connection.
+# Python 3.9 or newer.
 # Install with: pip install -r requirements.txt
 
-# --- Existing dependencies (splitter.py & CAVE) ---
+# --- CAVE & L2 Auto-Splitter ---
 caveclient          # CAVE / chunkedgraph access: preview_split, execute_split, level2_chunk_graph, segmentation_info
 numpy>=1.21
-scipy>=1.8          # sparse Laplacian and eigsh for the spectral bisection; cdist for closest-node merge pairing
-networkx>=2.8       # L2 graph; to_scipy_sparse_array needs 2.7+
+scipy>=1.8          # Sparse Laplacian / eigsh for spectral bisection; cKDTree / cdist for spatial matching
+networkx>=2.8       # L2 graph construction
 
-# --- Added dependencies (CATMAID-driven split & merge + CAVE -> CATMAID export) ---
-pandas>=1.5         # Node tables, batch dry-run plans, and CSV audit logs
-cloud-volume        # Fast batched supervoxel lookups via CloudVolume.scattered_points & MIP segmentation downloads
-python-catmaid      # PyPI package for `import pymaid` (CATMAID API, stack queries, and skeleton uploads)
-navis               # Local SWC skeleton caching, neuron node tree handling, healing, smoothing, and resampling
-skeletor			# mesh-to-skeleton converter, producing skeletons that can be wrapped into navis neuron objects for morphometrics
-trimesh
+# --- CATMAID <-> CAVE Proofreading & Skeleton Export ---
+pandas>=1.5         # Node tables, dry-run plans, and CSV audit logs
+cloud-volume        # Batched supervoxel lookups (scattered_points) & mesh downloads
+python-catmaid      # PyPI package for `import pymaid` (CATMAID API, stack queries, skeleton uploads/joins)
+navis               # Local SWC caching, neuron tree handling, healing, smoothing, and resampling
+skeletor            # Mesh-to-skeleton extraction (wavefront / TEASAR)
+trimesh             # Mesh vertex welding across Graphene octree chunk boundaries

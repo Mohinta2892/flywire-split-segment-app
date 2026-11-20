@@ -470,14 +470,15 @@ def execute_cave_export_plan(
                 if not final_skids and item["master_skid"] is not None:
                     final_skids = [int(item["master_skid"])]
 
-                if ann_list and final_skids:
+                per_neuron_anns = list(dict.fromkeys([*ann_list, rid_str])) if rid_str else list(ann_list)
+                if per_neuron_anns and final_skids:
                     _report(
                         progress_callback,
                         f"[{idx}/{len(approved)}] Applying CATMAID annotations...",
                         base_pct + 0.85 * span_pct,
                     )
                     retry_call(
-                        lambda: pymaid.add_annotations(final_skids, ann_list, remote_instance=rm),
+                        lambda anns=per_neuron_anns: pymaid.add_annotations(final_skids, anns, remote_instance=rm),
                         stage="CATMAID add_annotations",
                         progress_callback=progress_callback,
                     )
@@ -488,7 +489,7 @@ def execute_cave_export_plan(
                     "resulting_skids": ",".join(map(str, final_skids)),
                     "fragment_names": ", ".join(created_names) if created_names else f"Merged into {item['base_name']}",
                     "nodes_added": nodes_added,
-                    "annotations": ", ".join(ann_list),
+                    "annotations": ", ".join(per_neuron_anns),
                     "details": "; ".join(notes) if notes else "Uploaded cleanly",
                 })
             except Exception as exc:

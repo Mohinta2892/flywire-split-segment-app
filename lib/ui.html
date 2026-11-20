@@ -1,39 +1,42 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Segment splitter & CATMAID proofreading</title><style>
 *{box-sizing:border-box}body{font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:#f4f5f7;color:#1c2330}
-main{max-width:1200px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:28px 0 10px;display:flex;align-items:center;gap:6px}
-.sub,.hint{color:#5b6472}.sub{margin:2px 0 16px}.hint{margin:12px 0 0;font-size:13px}
+main{max-width:1240px;margin:auto;padding:32px 24px}h1{font-size:22px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:24px 0 10px;display:flex;align-items:center;gap:6px}
+.sub,.hint{color:#5b6472}.sub{margin:2px 0 16px}.hint{margin:10px 0 0;font-size:13px}
 .tabs{display:flex;gap:8px;border-bottom:1px solid #d5dae2;margin-bottom:20px;flex-wrap:wrap}
 .tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 14px;height:auto;font-weight:600;color:#5b6472;display:inline-flex;align-items:center;gap:6px}
 .tab:hover{background:transparent;color:#1c2330}.tab.active{color:#2b59c3;border-bottom-color:#2b59c3}
 .badge{display:inline-block;padding:0 7px;border-radius:999px;background:#e6eaf0;color:#3d4654;font-size:11px;font-weight:600}
 .tab.active .badge{background:#dce6fb;color:#2b59c3}
 .panel{display:none}.panel.active{display:block}
-.card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card,div.pad{padding:18px 20px}.scroll{overflow-x:auto}
-.fields{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap}label{display:grid;gap:4px;font-size:12px;font-weight:600;color:#5b6472}
+.card{background:#fff;border:1px solid #e1e4e9;border-radius:10px;box-shadow:0 1px 2px #1018280d}form.card,div.pad{padding:18px 20px}.scroll{overflow-x:auto;width:100%}
+.fields{display:flex;gap:14px 16px;align-items:flex-end;flex-wrap:wrap}
+.grid-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px 16px;align-items:end}
+.grid-fields input:not([type=checkbox]),.grid-fields select,.grid-fields textarea{width:100%!important;min-width:0}
+label{display:grid;gap:5px;font-size:12px;font-weight:600;color:#5b6472;min-width:0}
 .lbl-row{display:inline-flex;align-items:center;gap:5px}
-label.check{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:400;color:inherit;height:34px}
-input:not([type=checkbox]),select,textarea{font:inherit;font-weight:400;color:inherit;padding:6px 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff}
+label.check{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:#1c2330;min-height:34px;cursor:pointer}
+input:not([type=checkbox]),select,textarea{font:inherit;font-weight:400;color:inherit;padding:6px 10px;border:1px solid #cdd2da;border-radius:6px;background:#fff;max-width:100%}
 input:not([type=checkbox]),select{height:34px;padding:0 10px}#root{width:220px}#rounds{width:76px}
-button,a.btn{font:inherit;font-weight:500;white-space:nowrap;height:30px;padding:0 12px;border:1px solid #cdd2da;border-radius:6px;background:#fff;color:inherit;cursor:pointer;display:inline-flex;align-items:center;text-decoration:none}button:hover,a.btn:hover{background:#f1f3f5}
+button,a.btn{font:inherit;font-weight:500;white-space:nowrap;height:32px;padding:0 12px;border:1px solid #cdd2da;border-radius:6px;background:#fff;color:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none}button:hover,a.btn:hover{background:#f1f3f5}
 button:disabled{opacity:.55;cursor:not-allowed}
-.primary{height:34px;padding:0 18px;background:#2b59c3;border-color:#2b59c3;color:#fff}.primary:hover:not(:disabled){background:#234aa3}.danger{background:#b3261e;border-color:#b3261e;color:#fff}.danger:hover:not(:disabled){background:#94201a}
-table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;color:#5b6472;background:#fafbfc}th,td{border-bottom:1px solid #eceef1;padding:10px 14px;text-align:left;vertical-align:top}tr:last-child td{border-bottom:0}
+.primary{height:34px;padding:0 18px;background:#2b59c3;border-color:#2b59c3;color:#fff}.primary:hover:not(:disabled){background:#234aa3}.danger{height:34px;padding:0 18px;background:#b3261e;border-color:#b3261e;color:#fff}.danger:hover:not(:disabled){background:#94201a}
+table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;color:#5b6472;background:#fafbfc}th,td{border-bottom:1px solid #eceef1;padding:10px 14px;text-align:left;vertical-align:middle}tr:last-child td{border-bottom:0}
 .id{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:nowrap}.round{display:block;font:12px system-ui,sans-serif;color:#5b6472}.msg{color:#3d4654;font-size:13px;overflow-wrap:anywhere}.time{color:#5b6472;font-size:12px;white-space:nowrap}
-.s{display:inline-block;padding:1px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}.sys-cave{background:#e3edff;color:#1d4ed8}.sys-cm{background:#ede9fe;color:#5b21b6}
+.s{display:inline-block;padding:2px 9px;border-radius:999px;background:#eceef1;font-size:12px;font-weight:500;white-space:nowrap}.good{background:#dcf3e3;color:#17663a}.bad{background:#fbe2e0;color:#98211a}.busy{background:#fdf0c8;color:#7a5600}.sys-cave{background:#e3edff;color:#1d4ed8}.sys-cm{background:#ede9fe;color:#5b21b6}
 .copy{height:22px;padding:0 8px;margin-left:8px;font-size:12px;color:#5b6472;vertical-align:baseline}.msg{user-select:text}
 .top{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.helplink{color:#2b59c3;font-weight:500;text-decoration:none}.helplink:hover{text-decoration:underline}
-#err,#cm-err,#exp-err{color:#b3261e;margin-top:10px}#err:empty,#cm-err:empty,#exp-err:empty{display:none}td:first-child{white-space:nowrap}
+#err,#cm-err,#exp-err{color:#b3261e;margin-top:10px;font-weight:500}#err:empty,#cm-err:empty,#exp-err:empty{display:none}td:first-child{white-space:nowrap}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0}
 .metric{background:#fff;border:1px solid #e1e4e9;border-radius:8px;padding:12px 16px}.metric .v{font-size:20px;font-weight:600;margin-top:2px}
-.box{border:1px solid #d5dae2;border-radius:8px;padding:14px 16px;margin-top:14px;background:#fafbfc}.hide{display:none!important}
+.box{border:1px solid #d5dae2;border-radius:8px;padding:16px;margin-top:14px;background:#fafbfc}.hide{display:none!important}
 .ngl{display:inline-block;margin-left:8px;color:#2b59c3;font-weight:500;text-decoration:none}.ngl:hover{text-decoration:underline}
 .ok{color:#17663a;font-weight:600}
-.tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid #b8c0cc;color:#5b6472;font:600 10px/1 system-ui,sans-serif;cursor:help;opacity:.35;transition:opacity .15s,border-color .15s,color .15s,background .15s;user-select:none;flex-shrink:0}
-label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opacity:1;border-color:#2b59c3;color:#2b59c3;background:#eef3fd;outline:none}
+.tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid #b8c0cc;color:#5b6472;font:600 10px/1 system-ui,sans-serif;cursor:help;opacity:.45;transition:opacity .15s,border-color .15s,color .15s,background .15s;user-select:none;flex-shrink:0}
+label:hover .tip,.card:hover h2 .tip,.subsec-head:hover .tip,.tab:hover .tip,.tip:hover,.tip:focus{opacity:1;border-color:#2b59c3;color:#2b59c3;background:#eef3fd;outline:none}
 #tooltip{position:fixed;z-index:9999;max-width:300px;padding:8px 11px;border-radius:7px;background:#1c2330;color:#fff;font:400 12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 6px 18px #10182838;pointer-events:none;opacity:0;transition:opacity .12s}
 #tooltip.show{opacity:1}
 .cell-in{height:28px!important;padding:0 8px!important;font-size:13px!important;width:220px}
-.pbar-wrap{margin-top:12px}
+.pbar-wrap{margin-top:14px}
 .pbar-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;font-size:13px}
 .pbar-meta{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
 .pbar-track{height:8px;background:#e6eaf0;border-radius:999px;overflow:hidden}
@@ -42,12 +45,29 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
 .pbar-fill.fail{background:#b3261e}
 .rm-btn{height:26px;padding:0 9px;font-size:12px;color:#98211a;border-color:#e5b8b5;background:#fff}
 .rm-btn:hover{background:#fbe2e0;border-color:#b3261e}
+
+/* Tab 2 separated modular sections (2.1, 2.2, 2.3) */
+.subnav{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e1e4e9;border-radius:10px;padding:10px 14px;margin-bottom:20px}
+.subnav-pills{display:flex;gap:8px;flex-wrap:wrap}
+.subpill{height:30px;padding:0 12px;border-radius:999px;border:1px solid #d5dae2;background:#f8f9fb;color:#3d4654;font-size:13px;font-weight:600}
+.subpill:hover{background:#eef3fd;border-color:#adc4f7;color:#2b59c3}
+.subpill.active{background:#2b59c3;border-color:#2b59c3;color:#fff}
+.subsec{background:#fff;border:1px solid #d9dee7;border-radius:12px;padding:20px 22px;margin-bottom:24px;box-shadow:0 1px 3px #1018280a;position:relative;clear:both}
+.subsec-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-bottom:12px;margin-bottom:16px;border-bottom:1px solid #eceef1}
+.subsec-title{display:flex;align-items:center;gap:10px;margin:0;font-size:16px;font-weight:600;color:#1c2330}
+.sec-tag{display:inline-flex;align-items:center;justify-content:center;padding:2px 9px;border-radius:6px;font-size:12px;font-weight:700;letter-spacing:.02em}
+.sec-21{background:#e6eaf0;color:#2c3545}
+.sec-22{background:#e3edff;color:#1d4ed8}
+.sec-23{background:#ede9fe;color:#5b21b6}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:14px 0 10px}
+.toolbar-group{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.th-check{display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 </style></head><body><main>
 <div class="top"><h1>Segment splitter</h1><a id="help" class="helplink" target="_blank" rel="noopener">How to use</a></div><p class="sub">Each split or merge is a real chunkedgraph edit.</p>
 
 <nav class="tabs" role="tablist">
   <button type="button" class="tab active" data-tab="auto">Length-Based Auto Split <span class="tip" tabindex="0" data-tip="Automatically cut a single large CAVE false-merge segment at its most distant endpoints without needing CATMAID tracings.">i</span></button>
-  <button type="button" class="tab" data-tab="catmaid">CATMAID-Driven Split &amp; Merge <span class="tip" tabindex="0" data-tip="Bidirectional sync: (1) use CATMAID skeletons to split/merge CAVE segments, and (2) export proofread CAVE skeletons back into CATMAID.">i</span></button>
+  <button type="button" class="tab" data-tab="catmaid">CATMAID &harr; CAVE Sync &amp; Export <span class="tip" tabindex="0" data-tip="Separated into 2.1 CATMAID <-> CAVE communication, 2.2 CATMAID-driven split/merging, and 2.3 CAVE to CATMAID skeleton export.">i</span></button>
   <button type="button" class="tab" data-tab="changelog">Change Register (CAVE &amp; CATMAID) <span id="cl-badge" class="badge">0</span> <span class="tip" tabindex="0" data-tip="Persistent register of every real change applied in CAVE (splits/merges) and in CATMAID (exported skeletons, stitches, annotations).">i</span></button>
 </nav>
 
@@ -64,127 +84,177 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
 </section>
 
 <section id="panel-catmaid" class="panel">
-  <div class="card pad">
+  <!-- Sub-section view switcher for Tab 2 -->
+  <div class="subnav">
+    <div class="subnav-pills" role="group" aria-label="Tab 2 modules">
+      <button type="button" class="subpill active" data-subview="all">All Modules (2.1 &ndash; 2.3)</button>
+      <button type="button" class="subpill" data-subview="2.1">2.1 CATMAID &harr; CAVE Communication</button>
+      <button type="button" class="subpill" data-subview="2.2">2.2 CATMAID-Driven Split / Merging</button>
+      <button type="button" class="subpill" data-subview="2.3">2.3 CAVE &rarr; CATMAID Export</button>
+    </div>
+    <span id="cm-active-badge" class="s">No active project</span>
+  </div>
+
+  <!-- 2.1 CATMAID <-> CAVE COMMUNICATION -->
+  <section id="sec-2-1" class="subsec" data-sec="2.1">
+    <div class="subsec-head">
+      <h2 class="subsec-title">
+        <span class="sec-tag sec-21">2.1</span>
+        CATMAID &harr; CAVE Communication &amp; Volume Calibration
+        <span class="tip" tabindex="0" data-tip="Configure and verify your CATMAID API credentials, CAVE datastack connection, and voxel resolutions shared by 2.2 and 2.3.">i</span>
+      </h2>
+      <button type="button" id="cm-toggle-setup">Edit Connection / Resolution Setup</button>
+    </div>
+
     <div class="fields">
-      <label><span class="lbl-row">Sample / Project Profile <span class="tip" tabindex="0" data-tip="Saved CAVE + CATMAID connection profile. Choose '+ Custom Project' to configure a new dataset.">i</span></span><select id="cm-proj"></select></label>
-      <button type="button" id="cm-toggle-setup">Edit CATMAID / Resolution Setup</button>
-      <span class="tip" tabindex="0" data-tip="Show or hide server URLs, authentication credentials, and voxel resolution settings for the selected project.">i</span>
+      <label style="min-width:240px">
+        <span class="lbl-row">Sample / Project Profile <span class="tip" tabindex="0" data-tip="Saved CAVE + CATMAID connection profile. Choose '+ Custom Project' to configure a new dataset.">i</span></span>
+        <select id="cm-proj"></select>
+      </label>
     </div>
     <p id="cm-proj-info" class="hint"></p>
 
     <div id="cm-setup-box" class="box hide">
-      <div class="fields">
+      <div class="grid-fields">
         <label><span class="lbl-row">Project Name <span class="tip" tabindex="0" data-tip="Local profile name (e.g., Parker-Goog) used to store credentials and cache downloaded CATMAID skeletons.">i</span></span><input id="cm-name" placeholder="e.g. Parker-Goog"></label>
-        <label><span class="lbl-row">CAVE Datastack <span class="tip" tabindex="0" data-tip="CAVE segmentation datastack name from config.json.">i</span></span><input id="cm-ds" style="width:320px" placeholder="From config.json"></label>
-        <label><span class="lbl-row">CAVE Server URL <span class="tip" tabindex="0" data-tip="CAVE host URL (e.g., https://global.daf-apis.com). Uses your saved local CAVE token automatically.">i</span></span><input id="cm-srv" style="width:320px" placeholder="From config.json"></label>
-      </div>
-      <div class="fields" style="margin-top:12px">
-        <label><span class="lbl-row">CATMAID Server URL <span class="tip" tabindex="0" data-tip="Base CATMAID URL without '?pid=...' (e.g., https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem).">i</span></span><input id="cm-url" style="width:320px" placeholder="https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem"></label>
-        <label><span class="lbl-row">CATMAID Project ID <span class="tip" tabindex="0" data-tip="Numeric project ID ('pid=...') from your CATMAID browser address bar.">i</span></span><input id="cm-pid" type="number" min="1" value="15" style="width:105px"></label>
+        <label><span class="lbl-row">CAVE Datastack <span class="tip" tabindex="0" data-tip="CAVE segmentation datastack name from config.json.">i</span></span><input id="cm-ds" placeholder="From config.json"></label>
+        <label><span class="lbl-row">CAVE Server URL <span class="tip" tabindex="0" data-tip="CAVE host URL (e.g., https://global.daf-apis.com). Uses your saved local CAVE token automatically.">i</span></span><input id="cm-srv" placeholder="From config.json"></label>
+        <label><span class="lbl-row">CATMAID Server URL <span class="tip" tabindex="0" data-tip="Base CATMAID URL without '?pid=...' (e.g., https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem).">i</span></span><input id="cm-url" placeholder="https://neurophyla.mrc-lmb.cam.ac.uk/catmaid/fibsem"></label>
+        <label><span class="lbl-row">CATMAID Project ID <span class="tip" tabindex="0" data-tip="Numeric project ID ('pid=...') from your CATMAID browser address bar.">i</span></span><input id="cm-pid" type="number" min="1" value="15"></label>
         <label><span class="lbl-row">CATMAID API Token <span class="tip" tabindex="0" data-tip="Your 40-character personal CATMAID API token (in CATMAID: click your username top-right -> API token).">i</span></span><input id="cm-tok" type="password" placeholder="CATMAID API token"></label>
-        <label><span class="lbl-row">HTTP User (if required) <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth username if your server shows a browser login popup before CATMAID loads.">i</span></span><input id="cm-http-user" style="width:150px" placeholder="neurophyla user"></label>
+        <label><span class="lbl-row">HTTP User (if required) <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth username if your server shows a browser login popup before CATMAID loads.">i</span></span><input id="cm-http-user" placeholder="neurophyla user"></label>
         <label><span class="lbl-row">HTTP Password <span class="tip" tabindex="0" data-tip="Front-door HTTP Basic Auth password (Phase 1 popup password, not your CATMAID account password).">i</span></span><input id="cm-http-pass" type="password" placeholder="HTTP password"></label>
+      </div>
+      <div class="fields" style="margin-top:14px">
         <button type="button" id="cm-probe">1. Verify Connection &amp; Query</button>
         <span class="tip" tabindex="0" data-tip="Test both CATMAID and CAVE authentication and auto-query available image stacks and voxel resolutions.">i</span>
       </div>
       <p id="cm-probe-msg" class="hint"></p>
-      <div id="cm-res-box" class="fields" style="margin-top:12px">
+      <div id="cm-res-box" class="grid-fields" style="margin-top:14px">
         <label><span class="lbl-row">CATMAID Stack <span class="tip" tabindex="0" data-tip="Image stack found in this CATMAID project; selecting one fills its resolution if exposed by the server.">i</span></span><select id="cm-stack"><option value="">Verify connection or enter below</option></select></label>
         <label><span class="lbl-row">CATMAID Resolution (x,y,z nm) <span class="tip" tabindex="0" data-tip="Physical voxel size in nanometers (e.g., 8,8,16) used to align CATMAID tracings with CAVE.">i</span></span><input id="cm-res" placeholder="e.g. 8,8,16"></label>
         <label><span class="lbl-row">CAVE Resolution (x,y,z nm) <span class="tip" tabindex="0" data-tip="Base segmentation voxel resolution in nanometers queried from CAVE.">i</span></span><input id="cm-cave-res" placeholder="Queried from CAVE"></label>
         <label><span class="lbl-row">CATMAID Coord Unit <span class="tip" tabindex="0" data-tip="Units used by CATMAID skeleton node coordinates ('nm' in almost all projects, or 'voxels').">i</span></span><select id="cm-unit"><option value="nm">nm</option><option value="voxels">voxels</option></select></label>
+      </div>
+      <div class="fields" style="margin-top:14px">
         <button type="button" id="cm-save-proj" class="primary">2. Save Project Profile</button>
         <span class="tip" tabindex="0" data-tip="Save credentials and resolutions locally in .cave_catmaid_config.json so you don't need to re-enter them.">i</span>
       </div>
     </div>
-  </div>
+  </section>
 
-  <h2>1. CATMAID &rarr; CAVE: Proofread CAVE Segments from CATMAID Skeletons <span class="tip" tabindex="0" data-tip="Use manual CATMAID skeletons as ground truth to detect and fix false merges (splits) and false splits (merges) in CAVE.">i</span></h2>
-  <div class="card pad">
-    <div class="fields">
+  <!-- 2.2 CATMAID-DRIVEN SPLIT / MERGING -->
+  <section id="sec-2-2" class="subsec" data-sec="2.2">
+    <div class="subsec-head">
+      <h2 class="subsec-title">
+        <span class="sec-tag sec-22">2.2</span>
+        CATMAID-Driven Split &amp; Merging (CATMAID &rarr; CAVE)
+        <span class="tip" tabindex="0" data-tip="Use manual CATMAID skeletons as ground truth to detect and fix false merges (splits) and false splits (merges) in CAVE.">i</span>
+      </h2>
+    </div>
+
+    <div class="grid-fields">
       <label><span class="lbl-row">Load Skeletons By <span class="tip" tabindex="0" data-tip="Fetch CATMAID skeletons either by a shared annotation tag or by explicit skeleton IDs.">i</span></span><select id="cm-mode"><option value="annotation">CATMAID Annotation</option><option value="skids">Skeleton IDs (comma-separated)</option></select></label>
-      <label><span class="lbl-row">Annotation or Skeleton IDs <span class="tip" tabindex="0" data-tip="Exact CATMAID annotation (e.g., MBON_i1) or comma-separated skeleton IDs (e.g., 12345, 67890).">i</span></span><input id="cm-query" style="width:300px" placeholder="e.g. MBON_i1 or 12345, 67890"></label>
-      <label><span class="lbl-row">Min Nodes / Side <span class="tip" tabindex="0" data-tip="Minimum internal CATMAID nodes required on each side of a conflict to propose a split or merge (filters tip noise).">i</span></span><input id="cm-min-nodes" type="number" min="1" value="3" style="width:95px"></label>
+      <label><span class="lbl-row">Annotation or Skeleton IDs <span class="tip" tabindex="0" data-tip="Exact CATMAID annotation (e.g., MBON_i1) or comma-separated skeleton IDs (e.g., 12345, 67890).">i</span></span><input id="cm-query" placeholder="e.g. MBON_i1 or 12345, 67890"></label>
+      <label><span class="lbl-row">Min Nodes / Side <span class="tip" tabindex="0" data-tip="Minimum internal CATMAID nodes required on each side of a conflict to propose a split or merge (filters tip noise).">i</span></span><input id="cm-min-nodes" type="number" min="1" value="3"></label>
       <label class="check"><input id="cm-refresh" type="checkbox"> Re-download SWCs <span class="tip" tabindex="0" data-tip="Ignore cached SWC files on disk and download fresh skeleton geometries from CATMAID.">i</span></label>
+    </div>
+    <div class="fields" style="margin-top:14px">
       <button type="button" id="cm-plan-btn" class="primary">Download &amp; Build Dry-Run Plan</button>
       <span class="tip" tabindex="0" data-tip="Map CATMAID internal nodes to CAVE and generate a read-only dry-run table of proposed splits and merges.">i</span>
     </div>
     <p id="cm-status" class="hint"></p>
     <div id="cm-err" role="alert"></div>
-  </div>
 
-  <div id="cm-results" class="hide">
-    <div class="metrics" id="cm-metrics"></div>
+    <div id="cm-results" class="hide">
+      <div class="metrics" id="cm-metrics"></div>
 
-    <h2>Planned Splits (CAVE roots overlapping &gt;1 CATMAID skeleton) <span class="tip" tabindex="0" data-tip="False merges in CAVE where two or more distinct CATMAID neurons occupy the same CAVE segment.">i</span></h2>
-    <div class="fields" style="margin-bottom:8px">
-      <input id="cm-split-filter" style="width:280px" placeholder="Filter by CAVE Root ID or Skid...">
-      <button type="button" id="cm-splits-none">Uncheck All</button>
-      <button type="button" id="cm-splits-vis">Check Visible</button>
-      <span id="cm-splits-count" class="hint" style="margin:0"></span>
+      <h2>Planned Splits (CAVE roots overlapping &gt;1 CATMAID skeleton) <span class="tip" tabindex="0" data-tip="False merges in CAVE where two or more distinct CATMAID neurons occupy the same CAVE segment.">i</span></h2>
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <input id="cm-split-filter" style="width:260px" placeholder="Filter by CAVE Root ID or Skid...">
+          <button type="button" id="cm-splits-none">Uncheck All</button>
+          <button type="button" id="cm-splits-vis">Check Visible</button>
+        </div>
+        <span id="cm-splits-count" class="hint" style="margin:0"></span>
+      </div>
+      <div class="card scroll"><table id="cm-splits-tbl"></table></div>
+
+      <h2>Planned Merges (CATMAID skeletons spanning &gt;1 CAVE root) <span class="tip" tabindex="0" data-tip="False splits in CAVE where a single continuous CATMAID neuron crosses multiple CAVE segments.">i</span></h2>
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <input id="cm-merge-filter" style="width:260px" placeholder="Filter by CATMAID Skid or Root ID...">
+          <button type="button" id="cm-merges-none">Uncheck All</button>
+          <button type="button" id="cm-merges-vis">Check Visible</button>
+        </div>
+        <span id="cm-merges-count" class="hint" style="margin:0"></span>
+      </div>
+      <div class="card scroll"><table id="cm-merges-tbl"></table></div>
+
+      <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <button type="button" id="cm-exec-btn" class="danger">Execute Approved Splits &amp; Merges in CAVE</button>
+        <span class="tip" tabindex="0" data-tip="Apply only the checked rows in CAVE: splits execute first, root IDs refresh, then merges execute.">i</span>
+        <span id="cm-exec-summary" class="hint" style="margin:0">Executes all checked splits first, refreshes roots, then executes checked merges.</span>
+      </div>
+
+      <div id="cm-audit-wrap" class="hide">
+        <h2>Execution Audit Log <span class="tip" tabindex="0" data-tip="Record of every CAVE edit executed, including operation IDs needed if you ever want to undo a change.">i</span></h2>
+        <div class="card scroll"><table id="cm-audit-tbl"></table></div>
+      </div>
     </div>
-    <div class="card scroll"><table id="cm-splits-tbl"></table></div>
+  </section>
 
-    <h2>Planned Merges (CATMAID skeletons spanning &gt;1 CAVE root) <span class="tip" tabindex="0" data-tip="False splits in CAVE where a single continuous CATMAID neuron crosses multiple CAVE segments.">i</span></h2>
-    <div class="fields" style="margin-bottom:8px">
-      <input id="cm-merge-filter" style="width:280px" placeholder="Filter by CATMAID Skid or Root ID...">
-      <button type="button" id="cm-merges-none">Uncheck All</button>
-      <button type="button" id="cm-merges-vis">Check Visible</button>
-      <span id="cm-merges-count" class="hint" style="margin:0"></span>
-    </div>
-    <div class="card scroll"><table id="cm-merges-tbl"></table></div>
-
-    <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <button type="button" id="cm-exec-btn" class="danger">Execute Approved Splits &amp; Merges in CAVE</button>
-      <span class="tip" tabindex="0" data-tip="Apply only the checked rows in CAVE: splits execute first, root IDs refresh, then merges execute.">i</span>
-      <span id="cm-exec-summary" class="hint" style="margin:0">Executes all checked splits first, refreshes roots, then executes checked merges.</span>
+  <!-- 2.3 CAVE -> CATMAID EXPORT -->
+  <section id="sec-2-3" class="subsec" data-sec="2.3">
+    <div class="subsec-head">
+      <h2 class="subsec-title">
+        <span class="sec-tag sec-23">2.3</span>
+        CAVE &rarr; CATMAID Skeleton Export
+        <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segment meshes via skeletor + navis, subtract already-traced CATMAID branches, and upload missing skeletons into CATMAID with their CAVE ID annotated.">i</span>
+      </h2>
     </div>
 
-    <div id="cm-audit-wrap" class="hide">
-      <h2>Execution Audit Log <span class="tip" tabindex="0" data-tip="Record of every CAVE edit executed, including operation IDs needed if you ever want to undo a change.">i</span></h2>
-      <div class="card scroll"><table id="cm-audit-tbl"></table></div>
-    </div>
-  </div>
-
-  <h2>2. CAVE &rarr; CATMAID: Export Neuron Skeletons to CATMAID <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segment meshes via skeletor + navis, subtract already-traced CATMAID branches in the local neuron neighborhood, and upload missing backbones/arbors into CATMAID.">i</span></h2>
-  <div class="card pad">
-    <div class="fields">
-      <label><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
-        <textarea id="exp-roots" rows="2" style="width:270px" placeholder="720575940612345678, 720575940687654321"></textarea>
+    <div class="grid-fields">
+      <label style="grid-column:span 2"><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
+        <textarea id="exp-roots" rows="2" placeholder="720575940612345678, 720575940687654321"></textarea>
       </label>
-      <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch (e.g., 'KC' gives every neuron the name 'KC', which CATMAID displays as 'KC <id> (KC1) [RIGHT]' when annotated; use 'KC {n}' if you also want sequential numbers in the name).">i</span></span>
-        <input id="exp-name" style="width:165px" placeholder="e.g. KC">
+      <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch (e.g., 'KC' gives every neuron the name 'KC'; use 'KC {n}' for sequential numbering).">i</span></span>
+        <input id="exp-name" placeholder="e.g. KC">
       </label>
       <label><span class="lbl-row">Skeletor Method <span class="tip" tabindex="0" data-tip="Mesh skeletonization method: Wavefront (fast, smooth centerlines), Wavefront Exact (uniform step size), or TEASAR (mesh-based geodesic skeletonization).">i</span></span>
-        <select id="exp-method" style="width:145px">
+        <select id="exp-method">
           <option value="wavefront" selected>Wavefront</option>
           <option value="wavefront_exact">Wavefront Exact</option>
           <option value="teasar">TEASAR (Mesh)</option>
         </select>
       </label>
       <label><span class="lbl-row">Resample (nm) <span class="tip" tabindex="0" data-tip="Target inter-node spacing (nm) after mesh skeletonization, bounded healing, and smoothing (default 160 nm).">i</span></span>
-        <input id="exp-resample" type="number" min="16" value="160" style="width:85px">
+        <input id="exp-resample" type="number" min="16" value="160">
       </label>
-      <label><span class="lbl-row">Twig Prune (nm) <span class="tip" tabindex="0" data-tip="Prune minor surface hairs shorter than this length (nm) or shorter than 1.1x the local neurite diameter (default 500 nm; 0 = off).">i</span></span>
-        <input id="exp-twig" type="number" min="0" value="500" style="width:85px">
+      <label><span class="lbl-row">Twig Prune (nm) <span class="tip" tabindex="0" data-tip="Iteratively prune terminal surface twigs shorter than this length (nm) before and after smoothing/resampling (default 500 nm; 0 = off).">i</span></span>
+        <input id="exp-twig" type="number" min="0" value="500">
       </label>
       <label><span class="lbl-row">CATMAID Search Annotations <span class="tip" tabindex="0" data-tip="Optional: restrict overlap checks to skeletons with these CATMAID annotations. Leave blank to automatically check only the tight 3D path around the CAVE neuron.">i</span></span>
-        <input id="exp-search-ann" style="width:200px" placeholder="Optional (blank = local path)">
+        <input id="exp-search-ann" placeholder="Optional (blank = local path)">
       </label>
       <label><span class="lbl-row">Cut Buffer (nm) <span class="tip" tabindex="0" data-tip="Exclusion radius (nm) around existing CATMAID nodes. CAVE nodes inside this radius are cut away so manual tracings and synapses are never duplicated.">i</span></span>
-        <input id="exp-buffer" type="number" min="50" value="400" style="width:85px">
+        <input id="exp-buffer" type="number" min="50" value="400">
       </label>
       <label><span class="lbl-row">Z-Slice Step <span class="tip" tabindex="0" data-tip="Keep 1 node every N Z-slices along smooth neurites (1 = keep exact resampled spacing).">i</span></span>
-        <input id="exp-slice-step" type="number" min="1" max="20" value="1" style="width:75px">
+        <input id="exp-slice-step" type="number" min="1" max="20" value="1">
       </label>
-      <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC, KC1, RIGHT) applied to all neurons in the batch. CATMAID's Neuron Name Service renders these as (KC1) [RIGHT].">i</span></span>
-        <input id="exp-target-ann" style="width:195px" placeholder="e.g. KC, KC1, RIGHT">
+      <label><span class="lbl-row">Target CATMAID Annotations <span class="tip" tabindex="0" data-tip="Comma-separated CATMAID annotations (e.g., KC, KC1, RIGHT) applied to every exported skeleton. Each neuron's CAVE root ID is also automatically added as a CATMAID annotation.">i</span></span>
+        <input id="exp-target-ann" placeholder="e.g. KC, KC1, RIGHT">
       </label>
+    </div>
+
+    <div class="fields" style="margin-top:14px">
       <label class="check"><input id="exp-stitch" type="checkbox"> Auto-stitch into Master <span class="tip" tabindex="0" data-tip="Optional (off by default): automatically join exported missing subtrees onto the paired CATMAID skeleton. Leave unchecked to review and merge manually in CATMAID.">i</span></label>
       <button type="button" id="exp-plan-btn" class="primary">Build Export Dry-Run Plan</button>
       <span class="tip" tabindex="0" data-tip="Run mesh skeletonization, preview pairing, node counts, and editable neuron names before uploading anything to CATMAID.">i</span>
     </div>
-    <p class="hint">Uses <b>skeletor + navis</b> (mesh cleanup &rarr; skeletonize &rarr; bounded heal &rarr; smooth &rarr; resample). Set <b>Z-Slice Step = 1</b> to keep exact resampled spacing.</p>
+    <p class="hint">Uses <b>skeletor + navis</b> (mesh cleanup &rarr; skeletonize &rarr; bounded heal &rarr; twig prune &rarr; smooth &rarr; resample &rarr; post-resample twig prune). Each exported skeleton automatically receives its <b>CAVE root ID</b> as a CATMAID annotation in addition to Target CATMAID Annotations.</p>
+
     <div id="exp-prog-wrap" class="pbar-wrap hide">
       <div class="pbar-head">
         <span id="exp-status" class="msg"></span>
@@ -196,24 +266,31 @@ label:hover .tip,.card:hover h2 .tip,.tab:hover .tip,.tip:hover,.tip:focus{opaci
       <div class="pbar-track"><div id="exp-pbar-fill" class="pbar-fill"></div></div>
     </div>
     <div id="exp-err" role="alert"></div>
-  </div>
 
-  <div id="exp-results" class="hide">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin:28px 0 10px">
-      <h2 style="margin:0">Export Dry-Run Plan <span class="tip" tabindex="0" data-tip="Review how each CAVE segment matched existing CATMAID skeletons, edit names, or remove operations you do not want.">i</span></h2>
-      <button type="button" id="exp-clear-btn">Clear Plan</button>
+    <div id="exp-results" class="hide">
+      <div class="toolbar" style="margin-top:24px">
+        <div class="toolbar-group">
+          <h2 style="margin:0">Export Dry-Run Plan <span class="tip" tabindex="0" data-tip="Use Select All / Unselect All (or the header checkbox) to toggle batches at once, edit names, or remove rows.">i</span></h2>
+          <span id="exp-sel-count" class="s">Selected: 0 / 0</span>
+        </div>
+        <div class="toolbar-group">
+          <button type="button" id="exp-select-all">Select All</button>
+          <button type="button" id="exp-unselect-all">Unselect All</button>
+          <button type="button" id="exp-clear-btn">Clear Plan</button>
+        </div>
+      </div>
+      <div class="card scroll"><table id="exp-tbl"></table></div>
+      <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <button type="button" id="exp-exec-btn" class="primary">Export Approved Skeletons to CATMAID (0)</button>
+        <span class="tip" tabindex="0" data-tip="Upload approved non-overlapping fragments to CATMAID, stitch if enabled, and apply Target CATMAID Annotations + each neuron's CAVE root ID.">i</span>
+        <span class="hint" style="margin:0">Uploads only checked rows and annotates each skeleton with Target CATMAID Annotations + its CAVE root ID.</span>
+      </div>
+      <div id="exp-audit-wrap" class="hide">
+        <h2>CATMAID Export Log <span class="tip" tabindex="0" data-tip="Summary of resulting CATMAID skeleton IDs, uploaded node counts, and applied annotations (including CAVE root ID).">i</span></h2>
+        <div class="card scroll"><table id="exp-audit-tbl"></table></div>
+      </div>
     </div>
-    <div class="card scroll"><table id="exp-tbl"></table></div>
-    <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <button type="button" id="exp-exec-btn" class="primary">Export Approved Skeletons to CATMAID</button>
-      <span class="tip" tabindex="0" data-tip="Upload approved non-overlapping fragments to CATMAID, stitch if enabled, and apply Target CATMAID Annotations.">i</span>
-      <span class="hint" style="margin:0">Uploads only non-overlapping missing branches and applies Target CATMAID Annotations.</span>
-    </div>
-    <div id="exp-audit-wrap" class="hide">
-      <h2>CATMAID Export Log <span class="tip" tabindex="0" data-tip="Summary of resulting CATMAID skeleton IDs, uploaded node counts, and applied annotations.">i</span></h2>
-      <div class="card scroll"><table id="exp-audit-tbl"></table></div>
-    </div>
-  </div>
+  </section>
 </section>
 
 <section id="panel-changelog" class="panel">
@@ -305,15 +382,37 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   b.classList.add('active');$('panel-'+b.dataset.tab).classList.add('active');
 });
 
+/* Sub-section filter pills inside Tab 2 (All vs 2.1 vs 2.2 vs 2.3) */
+document.querySelectorAll('.subpill').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.subpill').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  const view=b.dataset.subview;
+  document.querySelectorAll('#panel-catmaid .subsec').forEach(sec=>{
+    sec.classList.toggle('hide',view!=='all'&&sec.dataset.sec!==view);
+  });
+});
+
 let cmCache=null,cmSplits=[],cmMerges=[],cmRenderedKey='',cmConfiguredSet=new Set();
-let expPlan=[],expRenderedKey='',clEntries=[],clRenderedKey='';
+let expPlan=[],expRenderedKey='',expUserEdits={},clEntries=[],clRenderedKey='';
 const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('cm-err').textContent=e.message}};
 const expSafe=f=>async()=>{try{$('exp-err').textContent='';await f()}catch(e){$('exp-err').textContent=e.message}};
+
+function updateActiveProjectBadge(name,configured){
+  const b=$('cm-active-badge');
+  if(!name||!configured){
+    b.textContent='Profile not saved yet';
+    b.className='s bad';
+  }else{
+    b.textContent=`Active Profile: ${name}`;
+    b.className='s good';
+  }
+}
 
 function fillProjectForm(name,d){
   const projects=d.projects||{},samples=d.sample_datastacks||{},defaultSrv=d.default_server||'';
   const cfg=projects[name];
   $('cm-probe-msg').textContent='';$('cm-probe-msg').classList.remove('ok');
+  updateActiveProjectBadge(name,!!cfg);
   if(!cfg){
     $('cm-name').value=(name&&name!=='+ Custom Project')?name:'';
     $('cm-ds').value=samples[name]||'';
@@ -472,31 +571,74 @@ function renderExportProgress(d){
   }
 }
 
-function updateExpExecButton(busy){
+function updateExpSelectionUI(busy){
+  const exportable=expPlan.filter(x=>x.fragment_count>0);
   const nApp=expPlan.filter(x=>x.approve).length;
+  $('exp-sel-count').textContent=`Selected: ${nApp} / ${exportable.length} exportable (${expPlan.length} total)`;
   $('exp-exec-btn').textContent=`Export Approved Skeletons to CATMAID (${nApp})`;
   $('exp-exec-btn').disabled=!!busy||nApp===0;
+  const hdrCb=$('exp-check-all');
+  if(hdrCb){
+    hdrCb.disabled=exportable.length===0;
+    hdrCb.checked=exportable.length>0&&nApp===exportable.length;
+    hdrCb.indeterminate=nApp>0&&nApp<exportable.length;
+  }
+}
+
+function setAllExportApproved(flag){
+  expPlan.forEach(row=>{
+    if(row.fragment_count>0){
+      row.approve=!!flag;
+      expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),approve:!!flag};
+    }
+  });
+  drawExportPlanTable();
 }
 
 function drawExportPlanTable(){
   if(!expPlan.length){
     $('exp-results').classList.add('hide');
-    updateExpExecButton(false);
+    updateExpSelectionUI(false);
     return;
   }
   $('exp-results').classList.remove('hide');
   const et=$('exp-tbl'),eh=el('tr');
-  ['Approve','CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Neuron / Fragment Name(s)',''].forEach(x=>eh.append(el('th',x)));
+
+  const thChk=el('th');
+  const lblChk=el('label',null,'th-check');
+  const hdrCb=el('input');hdrCb.type='checkbox';hdrCb.id='exp-check-all';
+  hdrCb.title='Select or unselect all exportable rows';
+  hdrCb.onchange=()=>setAllExportApproved(hdrCb.checked);
+  lblChk.append(hdrCb,document.createTextNode('Approve'));
+  thChk.append(lblChk);
+  eh.append(thChk);
+
+  ['CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Neuron / Fragment Name(s)',''].forEach(x=>eh.append(el('th',x)));
   et.replaceChildren(eh);
+
   expPlan.forEach((row,idx)=>{
     const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;
-    cb.onchange=()=>{expPlan[idx].approve=cb.checked;updateExpExecButton(false)};
+    cb.disabled=!(row.fragment_count>0);
+    cb.onchange=()=>{
+      expPlan[idx].approve=cb.checked;
+      expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),approve:cb.checked};
+      updateExpSelectionUI(false);
+    };
     const tdCb=el('td');tdCb.append(cb);
+    if(row.exported){
+      const tag=el('span','Exported','s good');
+      tag.style.marginLeft='6px';
+      tdCb.append(tag);
+    }
+
     const tdName=el('td');
     if(row.fragment_count>0){
       const inp=el('input',null,'cell-in');
       inp.value=row.fragment_names||'';
-      inp.oninput=()=>expPlan[idx].fragment_names=inp.value;
+      inp.oninput=()=>{
+        expPlan[idx].fragment_names=inp.value;
+        expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),fragment_names:inp.value};
+      };
       tdName.append(inp);
     }else{
       tdName.textContent='(already complete)';tdName.className='msg';
@@ -505,26 +647,49 @@ function drawExportPlanTable(){
     const rmBtn=el('button','Remove','rm-btn');
     rmBtn.type='button';
     rmBtn.title='Remove this operation from the dry-run plan';
-    rmBtn.onclick=()=>{expPlan.splice(idx,1);drawExportPlanTable()};
+    rmBtn.onclick=()=>{
+      expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),removed:true};
+      expPlan.splice(idx,1);
+      drawExportPlanTable();
+    };
     tdRm.append(rmBtn);
     r.append(tdCb,el('td',row.cave_root_id,'id'),el('td',row.match_type),el('td',row.paired_skids,'id'),
              el('td',`${row.kept_nodes} / ${row.total_nodes}`),tdName,tdRm);
     et.append(r);
   });
-  updateExpExecButton(false);
+  updateExpSelectionUI(false);
 }
 
-$('exp-clear-btn').onclick=()=>{expPlan=[];drawExportPlanTable()};
+$('exp-select-all').onclick=()=>setAllExportApproved(true);
+$('exp-unselect-all').onclick=()=>setAllExportApproved(false);
+$('exp-clear-btn').onclick=()=>{
+  expPlan.forEach(r=>{expUserEdits[r.cave_root_id]={removed:true}});
+  expPlan=[];
+  drawExportPlanTable();
+};
 
 function renderExportTables(d){
-  const key=JSON.stringify([d.export_status,(d.export_plan||[]).length,(d.export_audit||[]).length,d.export_elapsed_sec]);
+  const serverPlan=d.export_plan||[];
+  const key=JSON.stringify([d.export_status,serverPlan.map(x=>[x.cave_root_id,!!x.approve,!!x.exported]),(d.export_audit||[]).length,d.export_elapsed_sec]);
   if(key!==expRenderedKey){
     expRenderedKey=key;
-    expPlan=(d.export_plan||[]).map(x=>({...x}));
+    // When a brand-new dry-run plan finishes loading, clear stale local overrides
+    if(d.export_status==='loading'){expUserEdits={}}
+    expPlan=serverPlan
+      .filter(x=>!(expUserEdits[x.cave_root_id]&&expUserEdits[x.cave_root_id].removed))
+      .map(x=>{
+        const ed=expUserEdits[x.cave_root_id];
+        const copy={...x};
+        if(ed){
+          if(typeof ed.approve==='boolean'&&!x.exported)copy.approve=ed.approve;
+          if(typeof ed.fragment_names==='string')copy.fragment_names=ed.fragment_names;
+        }
+        return copy;
+      });
     drawExportPlanTable();
   }
   const expBusy=(d.export_status==='loading'||d.export_status==='executing');
-  updateExpExecButton(expBusy);
+  updateExpSelectionUI(expBusy);
 
   if(d.export_audit&&d.export_audit.length){
     $('exp-results').classList.remove('hide');
@@ -610,6 +775,7 @@ async function drawCatmaid(){
     fillProjectForm(sel.value,d);
   }
   cmConfiguredSet=new Set(Object.keys(d.projects||{}));
+  updateActiveProjectBadge(sel.value,cmConfiguredSet.has(sel.value));
   $('cm-status').textContent=d.progress||d.message||'';
   $('cm-plan-btn').disabled=(d.status==='loading'||d.status==='executing');
   $('cm-exec-btn').disabled=(d.status==='loading'||d.status==='executing');
@@ -671,7 +837,7 @@ $('cm-save-proj').onclick=cmSafe(async()=>{
 
 $('cm-plan-btn').onclick=cmSafe(async()=>{
   const proj=$('cm-proj').value;
-  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the 2.1 CATMAID & resolution setup above first.');
   await api('/api/catmaid/plan',{
     project_name:proj,mode:$('cm-mode').value,query:$('cm-query').value,
     min_nodes:+$('cm-min-nodes').value||3,force_refresh:$('cm-refresh').checked
@@ -688,7 +854,8 @@ $('cm-exec-btn').onclick=cmSafe(async()=>{
 
 $('exp-plan-btn').onclick=expSafe(async()=>{
   const proj=$('cm-proj').value;
-  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the 2.1 CATMAID & resolution setup above first.');
+  expUserEdits={};
   await api('/api/catmaid/export_plan',{
     project_name:proj,
     cave_roots:$('exp-roots').value,

@@ -107,14 +107,14 @@ def _prune_spurious_twigs(
     nrn: navis.TreeNeuron,
     min_twig_nm: float = 500.0,
     radius_factor: float = 2.2,
-    passes: int = 2,
+    max_passes: int = 25,
 ) -> navis.TreeNeuron:
-    """Prune short terminal surface hairs relative to local branch radius and minimum twig length."""
+    """Iteratively prune short terminal surface hairs and root spurs until no branch < threshold remains."""
     if min_twig_nm <= 0 and radius_factor <= 0:
         return nrn
 
     nodes = nrn.nodes.copy(deep=True)
-    for _ in range(max(1, int(passes))):
+    for _ in range(max(1, int(max_passes))):
         n = len(nodes)
         if n < 4:
             break
@@ -160,10 +160,30 @@ def _prune_spurious_twigs(
 
         to_delete: set[int] = set()
         for bp, twig_list in twigs_by_bp.items():
-            # Keep the longest branch at terminal forks so genuine distal tips are preserved
+            # When all children of a fork are short terminal twigs:
+            # - If bp is the root, keep the longest child.
+            # - If bp has a parent shaft, check total stem + longest-tip length:
+            #   delete all children if the entire forked spur is < thresh (so bp collapses
+            #   and is pruned on the next pass), otherwise keep the longest tip.
             if len(twig_list) >= len(children[bp]):
                 twig_list.sort(key=lambda x: x[0], reverse=True)
-                twig_list = twig_list[1:]
+                keep_longest = parent_idx[bp] < 0
+                if not keep_longest:
+                    stem_len = 0.0
+                    curr = bp
+                    while True:
+                        p = int(parent_idx[curr])
+                        if p < 0:
+                            break
+                        stem_len += float(np.linalg.norm(coords[curr] - coords[p]))
+                        if len(children[p]) >= 2:
+                            break
+                        curr = p
+                    bp_thresh = max(float(min_twig_nm), float(radius_factor) * float(radii[bp]))
+                    if (stem_len + twig_list[0][0]) >= bp_thresh:
+                        keep_longest = True
+                if keep_longest:
+                    twig_list = twig_list[1:]
             for _, path in twig_list:
                 to_delete.update(path)
 
@@ -203,7 +223,6 @@ def _prune_spurious_twigs(
             nodes.loc[nodes["node_id"].isin(new_roots), "parent_id"] = -1
 
     return _make_clean_tree_neuron(nodes, rid=int(nrn.id), name=nrn.name)
-
 
 def skeletonize_cave_roots_skeletor(
     cave_client: CAVEclient,
@@ -320,7 +339,7 @@ def skeletonize_cave_roots_skeletor(
                 nrn,
                 min_twig_nm=eff_min_twig,
                 radius_factor=radius_factor,
-                passes=2,
+                max_passes=25,
             )
 
         if smooth_window >= 3 and len(nrn.nodes) >= 6:
@@ -339,37 +358,17 @@ def skeletonize_cave_roots_skeletor(
             except Exception:
                 pass
 
+        # Final pruning pass after smoothing/resampling shrinks curved twigs below min_twig_nm
+        if eff_min_twig > 0 and len(nrn.nodes) >= 4:
+            nrn = _prune_spurious_twigs(
+                nrn,
+                min_twig_nm=eff_min_twig,
+                radius_factor=radius_factor,
+                max_passes=25,
+            )
+
         nodes = nrn.nodes.copy(deep=True)
         nodes[["x", "y", "z"]] = nodes[["x", "y", "z"]].to_numpy(dtype=np.float64) / cm_scale
         out[rid] = _make_clean_tree_neuron(nodes, rid=rid, name=f"cave_{rid}")
 
     return out
-
-
-def skeletonize_cave_root(
-    cave_client: CAVEclient,
-    root_id: int,
-    catmaid_resolution_nm: tuple[float, float, float] = (8.0, 8.0, 16.0),
-    catmaid_coord_unit: str = "nm",
-    skeletor_method: str | None = None,
-    min_twig_nm: float | None = None,
-    resample_to_nm: float | None = None,
-    max_heal_dist_nm: float | None = None,
-    skeletor_config: dict | None = None,
-    progress_callback=None,
-) -> navis.TreeNeuron:
-    """Skeletonize a single CAVE root_id and return its navis.TreeNeuron."""
-    rid = int(root_id)
-    res = skeletonize_cave_roots_skeletor(
-        cave_client=cave_client,
-        root_ids=[rid],
-        catmaid_resolution_nm=catmaid_resolution_nm,
-        catmaid_coord_unit=catmaid_coord_unit,
-        skeletor_method=skeletor_method,
-        min_twig_nm=min_twig_nm,
-        resample_to_nm=resample_to_nm,
-        max_heal_dist_nm=max_heal_dist_nm,
-        skeletor_config=skeletor_config,
-        progress_callback=progress_callback,
-    )
-    return res[rid]

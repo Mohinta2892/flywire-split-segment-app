@@ -971,6 +971,8 @@ class CatmaidService:
             if not self._export_bundle:
                 raise RuntimeError("Export bundle expired or missing. Rebuild the dry-run plan first.")
             bundle = self._export_bundle
+            # Persist the user's current checkbox and name edits so state polls never reset them
+            self._export_plan = [dict(r) for r in plan_rows]
             self._export_status = "executing"
             self._export_progress = f"Uploading {len(approved)} approved CAVE neuron(s) to CATMAID..."
             self._export_message = ""
@@ -1013,8 +1015,10 @@ class CatmaidService:
                 progress_callback=on_progress,
             )
 
+            succeeded_roots: set[str] = set()
             for item in audit:
                 if item.get("status") == "SUCCESS":
+                    succeeded_roots.add(str(item.get("cave_root_id", "")))
                     self._record_change(
                         system="CATMAID",
                         project=proj,
@@ -1031,6 +1035,11 @@ class CatmaidService:
 
             with self._lock:
                 elapsed = round(max(0.0, time.time() - (self._export_started_at or time.time())), 2)
+                # Keep unchecked rows unchecked; mark newly exported rows as exported and unchecked
+                for row in self._export_plan:
+                    if str(row.get("cave_root_id", "")) in succeeded_roots:
+                        row["approve"] = False
+                        row["exported"] = True
                 self._export_audit = audit
                 self._export_status = "done"
                 self._export_pct = 100.0
