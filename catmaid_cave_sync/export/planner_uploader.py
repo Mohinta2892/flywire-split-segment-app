@@ -5,6 +5,7 @@ import navis
 import numpy as np
 import pandas as pd
 import pymaid
+import re
 from caveclient import CAVEclient
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
@@ -216,29 +217,11 @@ def build_cave_export_plan(
             keep_mask = min_dists > float(cut_buffer_nm)
 
         if user_base:
-            base_name = user_base.replace("{n}", str(root_idx))
-            base_name = (
-                base_name.replace("{id}", str(rid))
-                .replace("{root_id}", str(rid))
-                .replace("{skid}", str(master_skid) if master_skid is not None else "new")
-            )
-            missing_parts = []
-            if master_skid is not None and str(master_skid) not in base_name:
-                missing_parts.append(f"skid_{master_skid}")
-            if str(rid) not in base_name:
-                missing_parts.append(f"cave_{rid}")
-            if missing_parts:
-                base_name = f"{base_name} ({', '.join(missing_parts)})"
+            base_name = user_base.replace("{n}", str(root_idx)) if "{n}" in user_base else user_base
         elif master_skid is not None:
-            master_name = str(trees_by_skid[master_skid]["name"]).strip()
-            missing_parts = []
-            if str(master_skid) not in master_name:
-                missing_parts.append(f"skid_{master_skid}")
-            if str(rid) not in master_name:
-                missing_parts.append(f"cave_{rid}")
-            base_name = f"{master_name} ({', '.join(missing_parts)})" if missing_parts else master_name
+            base_name = _strip_catmaid_display_suffix(trees_by_skid[master_skid]["name"])
         else:
-            base_name = f"cave_{rid}"
+            base_name = f"neuron_{root_idx}"
 
         raw_subtrees = split_kept_into_subtrees(nrn, keep_mask, min_fragment_nodes=min_fragment_nodes)
         subtrees = [
@@ -310,6 +293,60 @@ def _extract_uploaded_skid(upload_resp) -> int:
         return int(upload_resp[0]["skeleton_id"])
     raise RuntimeError(f"Unexpected response from pymaid.upload_neuron: {upload_resp}")
 
+def _strip_catmaid_display_suffix(raw_name: str) -> str:
+    """Strip CATMAID Neuron Name Service '(annotation) skid' suffixes if present."""
+    cleaned = re.sub(r"\s*\([^()]*\)\s*\d+\s*$", "", str(raw_name or "")).strip()
+    return cleaned or str(raw_name or "").strip()
+
+
+def _extract_uploaded_ids(upload_resp) -> tuple[int, int | None]:
+    if isinstance(upload_resp, dict) and "skeleton_id" in upload_resp:
+        nid = int(upload_resp["neuron_id"]) if upload_resp.get("neuron_id") is not None else None
+        return int(upload_resp["skeleton_id"]), nid
+    if isinstance(upload_resp, list) and upload_resp and isinstance(upload_resp[0], dict):
+        nid = int(upload_resp[0]["neuron_id"]) if upload_resp[0].get("neuron_id") is not None else None
+        return int(upload_resp[0]["skeleton_id"]), nid
+    raise RuntimeError(f"Unexpected response from pymaid.upload_neuron: {upload_resp}")
+
+
+def _set_catmaid_neuron_name(
+    rm: pymaid.CatmaidInstance,
+    skid: int,
+    neuron_name: str,
+    neuron_id: int | None = None,
+) -> None:
+    """Explicitly set the CATMAID neuron's database name (so Neuron Name Service does not fall back to annotations)."""
+    target_name = str(neuron_name or "").strip()
+    if not target_name:
+        return
+
+    nid = neuron_id
+    if nid is None:
+        info_url = rm.make_url(rm.project_id, "skeleton", int(skid), "neuronname")
+        info = retry_call(
+            lambda: rm.fetch(info_url),
+            stage=f"CATMAID lookup neuron_id({skid})",
+        )
+        if isinstance(info, dict) and info.get("neuronid") is not None:
+            nid = int(info["neuronid"])
+
+    if nid is not None:
+        rename_url = rm.make_url(rm.project_id, "neurons", int(nid), "rename")
+        try:
+            retry_call(
+                lambda: rm.fetch(rename_url, post={"name": target_name}),
+                stage=f"CATMAID rename neuron({nid} -> {target_name})",
+            )
+            return
+        except Exception:
+            if not hasattr(pymaid, "rename_neurons"):
+                raise
+
+    if hasattr(pymaid, "rename_neurons"):
+        retry_call(
+            lambda: pymaid.rename_neurons({int(skid): target_name}, remote_instance=rm),
+            stage=f"CATMAID rename_neurons({skid} -> {target_name})",
+        )
 
 def _join_catmaid_skeletons(
     rm: pymaid.CatmaidInstance,
@@ -413,6 +450,8 @@ def execute_cave_export_plan(
 
             try:
                 n_frags = max(1, len(item["fragments"]))
+                upload_sig = inspect.signature(pymaid.upload_neuron)
+                n_frags = max(1, len(item["fragments"]))
                 for f_idx, frag in enumerate(item["fragments"]):
                     frag_name = (
                         edited_names[f_idx]
@@ -427,18 +466,21 @@ def execute_cave_export_plan(
                         f"[{idx}/{len(approved)}] Uploading {frag_name} ({len(sub_df)} nodes)...",
                         base_pct + (f_idx / n_frags) * 0.7 * span_pct,
                     )
+                    up_kw = {
+                        "remote_instance": rm,
+                        "import_tags": False,
+                        "import_annotations": False,
+                        "import_connectors": False,
+                    }
+                    if "neuron_name" in upload_sig.parameters:
+                        up_kw["neuron_name"] = frag_name
+
                     up_res = retry_call(
-                        lambda n=nrn: pymaid.upload_neuron(
-                            n,
-                            remote_instance=rm,
-                            import_tags=False,
-                            import_annotations=False,
-                            import_connectors=False,
-                        ),
+                        lambda n=nrn, kw=up_kw: pymaid.upload_neuron(n, **kw),
                         stage=f"CATMAID upload_neuron({frag_name})",
                         progress_callback=progress_callback,
                     )
-                    new_skid = _extract_uploaded_skid(up_res)
+                    new_skid, new_nid = _extract_uploaded_ids(up_res)
                     nodes_added += len(sub_df)
 
                     anchor = frag.get("anchor")
@@ -455,6 +497,7 @@ def execute_cave_export_plan(
 
                     if auto_stitch and target_skid is not None and anchor_dist is not None:
                         if anchor_dist > float(max_stitch_dist_nm):
+                            _set_catmaid_neuron_name(rm, new_skid, frag_name, neuron_id=new_nid)
                             created_skids.append(new_skid)
                             created_names.append(frag_name)
                             notes.append(
@@ -477,30 +520,32 @@ def execute_cave_export_plan(
                                 stitched_skids.append(int(target_skid))
                                 notes.append(f"Stitched {frag_name} into SKID {target_skid} ({dist_nm:.0f} nm)")
                             except Exception as join_exc:
+                                _set_catmaid_neuron_name(rm, new_skid, frag_name, neuron_id=new_nid)
                                 created_skids.append(new_skid)
                                 created_names.append(frag_name)
                                 notes.append(f"Kept {frag_name} (SKID {new_skid}) separate: {join_exc}")
                     else:
+                        _set_catmaid_neuron_name(rm, new_skid, frag_name, neuron_id=new_nid)
                         created_skids.append(new_skid)
                         created_names.append(frag_name)
 
-                    final_skids = list(dict.fromkeys([*stitched_skids, *created_skids]))
-                    if not final_skids and item["master_skid"] is not None:
-                        final_skids = [int(item["master_skid"])]
-                    
-                    cave_ann = f"cave_{rid_str}"
-                    row_annotations = list(dict.fromkeys([*ann_list, cave_ann]))
-                    if row_annotations and final_skids:
-                        _report(
-                            progress_callback,
-                            f"[{idx}/{len(approved)}] Applying CATMAID annotations ({', '.join(row_annotations)})...",
-                            base_pct + 0.85 * span_pct,
-                        )
-                        retry_call(
-                            lambda anns=row_annotations: pymaid.add_annotations(final_skids, anns, remote_instance=rm),
-                            stage="CATMAID add_annotations",
-                            progress_callback=progress_callback,
-                        )
+                final_skids = list(dict.fromkeys([*stitched_skids, *created_skids]))
+                if not final_skids and item["master_skid"] is not None:
+                    final_skids = [int(item["master_skid"])]
+
+                cave_ann = f"cave_{rid_str}"
+                row_annotations = list(dict.fromkeys([*ann_list, cave_ann]))
+                if row_annotations and final_skids:
+                    _report(
+                        progress_callback,
+                        f"[{idx}/{len(approved)}] Applying CATMAID annotations ({', '.join(row_annotations)})...",
+                        base_pct + 0.85 * span_pct,
+                    )
+                    retry_call(
+                        lambda anns=row_annotations: pymaid.add_annotations(final_skids, anns, remote_instance=rm),
+                        stage="CATMAID add_annotations",
+                        progress_callback=progress_callback,
+                    )
 
                 audit.append({
                     "cave_root_id": rid_str,
