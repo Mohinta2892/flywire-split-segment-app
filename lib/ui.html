@@ -35,7 +35,7 @@ table{border-collapse:collapse;width:100%}th{font-size:12px;font-weight:600;colo
 label:hover .tip,.card:hover h2 .tip,.subsec-head:hover .tip,.tab:hover .tip,.tip:hover,.tip:focus{opacity:1;border-color:#2b59c3;color:#2b59c3;background:#eef3fd;outline:none}
 #tooltip{position:fixed;z-index:9999;max-width:300px;padding:8px 11px;border-radius:7px;background:#1c2330;color:#fff;font:400 12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 6px 18px #10182838;pointer-events:none;opacity:0;transition:opacity .12s}
 #tooltip.show{opacity:1}
-.cell-in{height:28px!important;padding:0 8px!important;font-size:13px!important;width:220px}
+.cell-in{height:28px!important;padding:0 8px!important;font-size:13px!important;width:240px}
 .pbar-wrap{margin-top:14px}
 .pbar-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;font-size:13px}
 .pbar-meta{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
@@ -210,7 +210,7 @@ label:hover .tip,.card:hover h2 .tip,.subsec-head:hover .tip,.tab:hover .tip,.ti
       <h2 class="subsec-title">
         <span class="sec-tag sec-23">2.3</span>
         CAVE &rarr; CATMAID Skeleton Export
-        <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segment meshes via skeletor + navis, subtract already-traced CATMAID branches, and upload missing skeletons into CATMAID with their CAVE ID annotated.">i</span>
+        <span class="tip" tabindex="0" data-tip="Skeletonize proofread CAVE segment meshes via skeletor + navis, subtract already-traced CATMAID branches, and upload missing skeletons into CATMAID with their CAVE ID in both the neuron name and annotations.">i</span>
       </h2>
     </div>
 
@@ -218,8 +218,8 @@ label:hover .tip,.card:hover h2 .tip,.subsec-head:hover .tip,.tab:hover .tip,.ti
       <label style="grid-column:span 2"><span class="lbl-row">CAVE Root IDs <span class="tip" tabindex="0" data-tip="One or more proofread CAVE segment root_ids (comma, space, or newline separated) to skeletonize and export.">i</span></span>
         <textarea id="exp-roots" rows="2" placeholder="720575940612345678, 720575940687654321"></textarea>
       </label>
-      <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch (e.g., 'KC' gives every neuron the name 'KC'; use 'KC {n}' for sequential numbering).">i</span></span>
-        <input id="exp-name" placeholder="e.g. KC">
+      <label><span class="lbl-row">Neuron / Batch Name <span class="tip" tabindex="0" data-tip="Base neuron name applied to the batch. Automatically appends the paired CATMAID SKID (skid_<id>) and CAVE root ID (cave_<id>) unless already present; supports {n}, {skid}, and {id} placeholders.">i</span></span>
+        <input id="exp-name" placeholder="e.g. KC (auto-adds IDs)">
       </label>
       <label><span class="lbl-row">Skeletor Method <span class="tip" tabindex="0" data-tip="Mesh skeletonization method: Wavefront (fast, smooth centerlines), Wavefront Exact (uniform step size), or TEASAR (mesh-based geodesic skeletonization).">i</span></span>
         <select id="exp-method">
@@ -253,7 +253,7 @@ label:hover .tip,.card:hover h2 .tip,.subsec-head:hover .tip,.tab:hover .tip,.ti
       <button type="button" id="exp-plan-btn" class="primary">Build Export Dry-Run Plan</button>
       <span class="tip" tabindex="0" data-tip="Run mesh skeletonization, preview pairing, node counts, and editable neuron names before uploading anything to CATMAID.">i</span>
     </div>
-    <p class="hint">Uses <b>skeletor + navis</b> (mesh cleanup &rarr; skeletonize &rarr; bounded heal &rarr; twig prune &rarr; smooth &rarr; resample &rarr; post-resample twig prune). Each exported skeleton automatically receives its <b>CAVE root ID</b> as a CATMAID annotation in addition to Target CATMAID Annotations.</p>
+    <p class="hint">Uses <b>skeletor + navis</b> (mesh cleanup &rarr; skeletonize &rarr; bounded heal &rarr; twig prune &rarr; smooth &rarr; resample &rarr; post-resample twig prune). Each exported skeleton automatically includes its <b>CAVE root ID</b> (and paired CATMAID SKID) in its name and receives its <b>CAVE root ID</b> as a CATMAID annotation.</p>
 
     <div id="exp-prog-wrap" class="pbar-wrap hide">
       <div class="pbar-head">
@@ -382,37 +382,40 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   b.classList.add('active');$('panel-'+b.dataset.tab).classList.add('active');
 });
 
-/* Sub-section filter pills inside Tab 2 (All vs 2.1 vs 2.2 vs 2.3) */
 document.querySelectorAll('.subpill').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.subpill').forEach(x=>x.classList.remove('active'));
   b.classList.add('active');
-  const view=b.dataset.subview;
-  document.querySelectorAll('#panel-catmaid .subsec').forEach(sec=>{
-    sec.classList.toggle('hide',view!=='all'&&sec.dataset.sec!==view);
+  const v=b.dataset.subview;
+  document.querySelectorAll('.subsec').forEach(s=>{
+    s.classList.toggle('hide',v!=='all'&&s.dataset.sec!==v);
   });
 });
 
 let cmCache=null,cmSplits=[],cmMerges=[],cmRenderedKey='',cmConfiguredSet=new Set();
-let expPlan=[],expRenderedKey='',expUserEdits={},clEntries=[],clRenderedKey='';
+let expPlan=[],expRenderedKey='',clEntries=[],clRenderedKey='';
 const cmSafe=f=>async()=>{try{$('cm-err').textContent='';await f()}catch(e){$('cm-err').textContent=e.message}};
 const expSafe=f=>async()=>{try{$('exp-err').textContent='';await f()}catch(e){$('exp-err').textContent=e.message}};
 
 function updateActiveProjectBadge(name,configured){
   const b=$('cm-active-badge');
-  if(!name||!configured){
-    b.textContent='Profile not saved yet';
-    b.className='s bad';
+  if(!b)return;
+  b.classList.remove('good','busy');
+  if(!name||name==='+ Custom Project'){
+    b.textContent='No active project';
+  }else if(configured){
+    b.textContent=`Active: ${name}`;
+    b.classList.add('good');
   }else{
-    b.textContent=`Active Profile: ${name}`;
-    b.className='s good';
+    b.textContent=`Setup needed: ${name}`;
+    b.classList.add('busy');
   }
 }
 
 function fillProjectForm(name,d){
   const projects=d.projects||{},samples=d.sample_datastacks||{},defaultSrv=d.default_server||'';
   const cfg=projects[name];
-  $('cm-probe-msg').textContent='';$('cm-probe-msg').classList.remove('ok');
   updateActiveProjectBadge(name,!!cfg);
+  $('cm-probe-msg').textContent='';$('cm-probe-msg').classList.remove('ok');
   if(!cfg){
     $('cm-name').value=(name&&name!=='+ Custom Project')?name:'';
     $('cm-ds').value=samples[name]||'';
@@ -571,74 +574,54 @@ function renderExportProgress(d){
   }
 }
 
-function updateExpSelectionUI(busy){
-  const exportable=expPlan.filter(x=>x.fragment_count>0);
-  const nApp=expPlan.filter(x=>x.approve).length;
-  $('exp-sel-count').textContent=`Selected: ${nApp} / ${exportable.length} exportable (${expPlan.length} total)`;
+function updateExpExecButton(busy){
+  const selectable=expPlan.filter(x=>x.fragment_count>0);
+  const nApp=selectable.filter(x=>x.approve).length;
+  $('exp-sel-count').textContent=`Selected: ${nApp} / ${selectable.length}`;
   $('exp-exec-btn').textContent=`Export Approved Skeletons to CATMAID (${nApp})`;
   $('exp-exec-btn').disabled=!!busy||nApp===0;
-  const hdrCb=$('exp-check-all');
-  if(hdrCb){
-    hdrCb.disabled=exportable.length===0;
-    hdrCb.checked=exportable.length>0&&nApp===exportable.length;
-    hdrCb.indeterminate=nApp>0&&nApp<exportable.length;
+  const hc=$('exp-head-check');
+  if(hc){
+    hc.disabled=selectable.length===0;
+    hc.checked=selectable.length>0&&nApp===selectable.length;
+    hc.indeterminate=nApp>0&&nApp<selectable.length;
   }
-}
-
-function setAllExportApproved(flag){
-  expPlan.forEach(row=>{
-    if(row.fragment_count>0){
-      row.approve=!!flag;
-      expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),approve:!!flag};
-    }
-  });
-  drawExportPlanTable();
 }
 
 function drawExportPlanTable(){
   if(!expPlan.length){
     $('exp-results').classList.add('hide');
-    updateExpSelectionUI(false);
+    updateExpExecButton(false);
     return;
   }
   $('exp-results').classList.remove('hide');
   const et=$('exp-tbl'),eh=el('tr');
-
   const thChk=el('th');
   const lblChk=el('label',null,'th-check');
-  const hdrCb=el('input');hdrCb.type='checkbox';hdrCb.id='exp-check-all';
-  hdrCb.title='Select or unselect all exportable rows';
-  hdrCb.onchange=()=>setAllExportApproved(hdrCb.checked);
-  lblChk.append(hdrCb,document.createTextNode('Approve'));
+  const headCb=el('input');headCb.type='checkbox';headCb.id='exp-head-check';
+  headCb.onchange=()=>{
+    const checked=headCb.checked;
+    expPlan.forEach(row=>{if(row.fragment_count>0)row.approve=checked});
+    drawExportPlanTable();
+  };
+  lblChk.append(headCb,document.createTextNode(' Approve'));
   thChk.append(lblChk);
   eh.append(thChk);
-
   ['CAVE Root ID','Match Type','Paired CATMAID SKID(s)','Kept / Total Nodes','Neuron / Fragment Name(s)',''].forEach(x=>eh.append(el('th',x)));
   et.replaceChildren(eh);
-
   expPlan.forEach((row,idx)=>{
-    const r=el('tr'),cb=el('input');cb.type='checkbox';cb.checked=!!row.approve;
-    cb.disabled=!(row.fragment_count>0);
-    cb.onchange=()=>{
-      expPlan[idx].approve=cb.checked;
-      expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),approve:cb.checked};
-      updateExpSelectionUI(false);
-    };
+    const r=el('tr'),cb=el('input');cb.type='checkbox';
+    const canApprove=row.fragment_count>0;
+    if(!canApprove)row.approve=false;
+    cb.checked=!!row.approve&&canApprove;
+    cb.disabled=!canApprove;
+    cb.onchange=()=>{expPlan[idx].approve=cb.checked;updateExpExecButton(false)};
     const tdCb=el('td');tdCb.append(cb);
-    if(row.exported){
-      const tag=el('span','Exported','s good');
-      tag.style.marginLeft='6px';
-      tdCb.append(tag);
-    }
-
     const tdName=el('td');
-    if(row.fragment_count>0){
+    if(canApprove){
       const inp=el('input',null,'cell-in');
       inp.value=row.fragment_names||'';
-      inp.oninput=()=>{
-        expPlan[idx].fragment_names=inp.value;
-        expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),fragment_names:inp.value};
-      };
+      inp.oninput=()=>expPlan[idx].fragment_names=inp.value;
       tdName.append(inp);
     }else{
       tdName.textContent='(already complete)';tdName.className='msg';
@@ -647,49 +630,28 @@ function drawExportPlanTable(){
     const rmBtn=el('button','Remove','rm-btn');
     rmBtn.type='button';
     rmBtn.title='Remove this operation from the dry-run plan';
-    rmBtn.onclick=()=>{
-      expUserEdits[row.cave_root_id]={...(expUserEdits[row.cave_root_id]||{}),removed:true};
-      expPlan.splice(idx,1);
-      drawExportPlanTable();
-    };
+    rmBtn.onclick=()=>{expPlan.splice(idx,1);drawExportPlanTable()};
     tdRm.append(rmBtn);
     r.append(tdCb,el('td',row.cave_root_id,'id'),el('td',row.match_type),el('td',row.paired_skids,'id'),
              el('td',`${row.kept_nodes} / ${row.total_nodes}`),tdName,tdRm);
     et.append(r);
   });
-  updateExpSelectionUI(false);
+  updateExpExecButton(false);
 }
 
-$('exp-select-all').onclick=()=>setAllExportApproved(true);
-$('exp-unselect-all').onclick=()=>setAllExportApproved(false);
-$('exp-clear-btn').onclick=()=>{
-  expPlan.forEach(r=>{expUserEdits[r.cave_root_id]={removed:true}});
-  expPlan=[];
-  drawExportPlanTable();
-};
+$('exp-select-all').onclick=()=>{expPlan.forEach(x=>{if(x.fragment_count>0)x.approve=true});drawExportPlanTable()};
+$('exp-unselect-all').onclick=()=>{expPlan.forEach(x=>x.approve=false);drawExportPlanTable()};
+$('exp-clear-btn').onclick=()=>{expPlan=[];drawExportPlanTable()};
 
 function renderExportTables(d){
-  const serverPlan=d.export_plan||[];
-  const key=JSON.stringify([d.export_status,serverPlan.map(x=>[x.cave_root_id,!!x.approve,!!x.exported]),(d.export_audit||[]).length,d.export_elapsed_sec]);
+  const key=JSON.stringify([d.export_status,(d.export_plan||[]).length,(d.export_audit||[]).length,d.export_elapsed_sec]);
   if(key!==expRenderedKey){
     expRenderedKey=key;
-    // When a brand-new dry-run plan finishes loading, clear stale local overrides
-    if(d.export_status==='loading'){expUserEdits={}}
-    expPlan=serverPlan
-      .filter(x=>!(expUserEdits[x.cave_root_id]&&expUserEdits[x.cave_root_id].removed))
-      .map(x=>{
-        const ed=expUserEdits[x.cave_root_id];
-        const copy={...x};
-        if(ed){
-          if(typeof ed.approve==='boolean'&&!x.exported)copy.approve=ed.approve;
-          if(typeof ed.fragment_names==='string')copy.fragment_names=ed.fragment_names;
-        }
-        return copy;
-      });
+    expPlan=(d.export_plan||[]).map(x=>({...x}));
     drawExportPlanTable();
   }
   const expBusy=(d.export_status==='loading'||d.export_status==='executing');
-  updateExpSelectionUI(expBusy);
+  updateExpExecButton(expBusy);
 
   if(d.export_audit&&d.export_audit.length){
     $('exp-results').classList.remove('hide');
@@ -765,6 +727,7 @@ function scheduleCatmaidPoll(fast){
 
 async function drawCatmaid(){
   const d=await api('/api/catmaid/state');cmCache=d;
+  cmConfiguredSet=new Set(Object.keys(d.projects||{}));
   const sel=$('cm-proj');
   const allNames=Array.from(new Set([...Object.keys(d.sample_datastacks||{}),...Object.keys(d.projects||{})]));
   const opts=[...allNames,'+ Custom Project'];
@@ -773,9 +736,9 @@ async function drawCatmaid(){
     opts.forEach(n=>sel.append(new Option(n,n)));
     sel.value=allNames.includes(prev)?prev:(d.active_project&&allNames.includes(d.active_project)?d.active_project:opts[0]);
     fillProjectForm(sel.value,d);
+  }else{
+    updateActiveProjectBadge(sel.value,cmConfiguredSet.has(sel.value));
   }
-  cmConfiguredSet=new Set(Object.keys(d.projects||{}));
-  updateActiveProjectBadge(sel.value,cmConfiguredSet.has(sel.value));
   $('cm-status').textContent=d.progress||d.message||'';
   $('cm-plan-btn').disabled=(d.status==='loading'||d.status==='executing');
   $('cm-exec-btn').disabled=(d.status==='loading'||d.status==='executing');
@@ -837,7 +800,7 @@ $('cm-save-proj').onclick=cmSafe(async()=>{
 
 $('cm-plan-btn').onclick=cmSafe(async()=>{
   const proj=$('cm-proj').value;
-  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the 2.1 CATMAID & resolution setup above first.');
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
   await api('/api/catmaid/plan',{
     project_name:proj,mode:$('cm-mode').value,query:$('cm-query').value,
     min_nodes:+$('cm-min-nodes').value||3,force_refresh:$('cm-refresh').checked
@@ -854,8 +817,7 @@ $('cm-exec-btn').onclick=cmSafe(async()=>{
 
 $('exp-plan-btn').onclick=expSafe(async()=>{
   const proj=$('cm-proj').value;
-  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the 2.1 CATMAID & resolution setup above first.');
-  expUserEdits={};
+  if(!proj||!cmConfiguredSet.has(proj))throw new Error('Complete and save the first-time CATMAID & resolution setup above first.');
   await api('/api/catmaid/export_plan',{
     project_name:proj,
     cave_roots:$('exp-roots').value,
@@ -871,7 +833,7 @@ $('exp-plan-btn').onclick=expSafe(async()=>{
 });
 
 $('exp-exec-btn').onclick=expSafe(async()=>{
-  const nE=expPlan.filter(x=>x.approve).length;
+  const nE=expPlan.filter(x=>x.approve&&x.fragment_count>0).length;
   if(!nE)throw new Error('Approve at least one CAVE segment row first.');
   if(!confirm(`Upload approved CAVE skeleton fragments for ${nE} segment(s) into CATMAID?`))return;
   await api('/api/catmaid/export_execute',{

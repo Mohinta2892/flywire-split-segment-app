@@ -216,9 +216,27 @@ def build_cave_export_plan(
             keep_mask = min_dists > float(cut_buffer_nm)
 
         if user_base:
-            base_name = user_base.replace("{n}", str(root_idx)) if "{n}" in user_base else user_base
+            base_name = user_base.replace("{n}", str(root_idx))
+            base_name = (
+                base_name.replace("{id}", str(rid))
+                .replace("{root_id}", str(rid))
+                .replace("{skid}", str(master_skid) if master_skid is not None else "new")
+            )
+            missing_parts = []
+            if master_skid is not None and str(master_skid) not in base_name:
+                missing_parts.append(f"skid_{master_skid}")
+            if str(rid) not in base_name:
+                missing_parts.append(f"cave_{rid}")
+            if missing_parts:
+                base_name = f"{base_name} ({', '.join(missing_parts)})"
         elif master_skid is not None:
-            base_name = trees_by_skid[master_skid]["name"]
+            master_name = str(trees_by_skid[master_skid]["name"]).strip()
+            missing_parts = []
+            if str(master_skid) not in master_name:
+                missing_parts.append(f"skid_{master_skid}")
+            if str(rid) not in master_name:
+                missing_parts.append(f"cave_{rid}")
+            base_name = f"{master_name} ({', '.join(missing_parts)})" if missing_parts else master_name
         else:
             base_name = f"cave_{rid}"
 
@@ -466,22 +484,23 @@ def execute_cave_export_plan(
                         created_skids.append(new_skid)
                         created_names.append(frag_name)
 
-                final_skids = list(dict.fromkeys([*stitched_skids, *created_skids]))
-                if not final_skids and item["master_skid"] is not None:
-                    final_skids = [int(item["master_skid"])]
-
-                per_neuron_anns = list(dict.fromkeys([*ann_list, rid_str])) if rid_str else list(ann_list)
-                if per_neuron_anns and final_skids:
-                    _report(
-                        progress_callback,
-                        f"[{idx}/{len(approved)}] Applying CATMAID annotations...",
-                        base_pct + 0.85 * span_pct,
-                    )
-                    retry_call(
-                        lambda anns=per_neuron_anns: pymaid.add_annotations(final_skids, anns, remote_instance=rm),
-                        stage="CATMAID add_annotations",
-                        progress_callback=progress_callback,
-                    )
+                    final_skids = list(dict.fromkeys([*stitched_skids, *created_skids]))
+                    if not final_skids and item["master_skid"] is not None:
+                        final_skids = [int(item["master_skid"])]
+                    
+                    cave_ann = f"cave_{rid_str}"
+                    row_annotations = list(dict.fromkeys([*ann_list, cave_ann]))
+                    if row_annotations and final_skids:
+                        _report(
+                            progress_callback,
+                            f"[{idx}/{len(approved)}] Applying CATMAID annotations ({', '.join(row_annotations)})...",
+                            base_pct + 0.85 * span_pct,
+                        )
+                        retry_call(
+                            lambda anns=row_annotations: pymaid.add_annotations(final_skids, anns, remote_instance=rm),
+                            stage="CATMAID add_annotations",
+                            progress_callback=progress_callback,
+                        )
 
                 audit.append({
                     "cave_root_id": rid_str,
@@ -489,7 +508,7 @@ def execute_cave_export_plan(
                     "resulting_skids": ",".join(map(str, final_skids)),
                     "fragment_names": ", ".join(created_names) if created_names else f"Merged into {item['base_name']}",
                     "nodes_added": nodes_added,
-                    "annotations": ", ".join(per_neuron_anns),
+                    "annotations": ", ".join(ann_list),
                     "details": "; ".join(notes) if notes else "Uploaded cleanly",
                 })
             except Exception as exc:
